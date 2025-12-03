@@ -1,0 +1,17 @@
+{
+  "mod_channel": null,
+  "counting_channel": null,
+  "election_channel": null,
+  "parliament_channel": null,
+  "economy_enabled": true,
+  "casino_enabled": true,
+  "elections_enabled": true,
+  "tax_rate": 0.05,
+  "daily_amount": 1000,
+  "weekly_amount": 7500,
+  "work_min": 100,
+  "work_max": 500,
+  "crime_min": 200,
+  "crime_max": 1500,
+  "crime_fail_chance": 0.4
+}

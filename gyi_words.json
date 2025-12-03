@@ -1,0 +1,44 @@
+{
+  "pairs": [
+    {
+      "normal": "Beach",
+      "impostor": "Desert"
+    },
+    {
+      "normal": "Apple",
+      "impostor": "Banana"
+    },
+    {
+      "normal": "Dog",
+      "impostor": "Cat"
+    },
+    {
+      "normal": "Summer",
+      "impostor": "Winter"
+    },
+    {
+      "normal": "Mountain",
+      "impostor": "Valley"
+    },
+    {
+      "normal": "Ocean",
+      "impostor": "Lake"
+    },
+    {
+      "normal": "Car",
+      "impostor": "Bicycle"
+    },
+    {
+      "normal": "Pizza",
+      "impostor": "Burger"
+    },
+    {
+      "normal": "Coffee",
+      "impostor": "Tea"
+    },
+    {
+      "normal": "Guitar",
+      "impostor": "Piano"
+    }
+  ]
+}

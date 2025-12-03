@@ -1,0 +1,44 @@
+{
+  "prompts": [
+    {
+      "normal": "Something you find at the beach",
+      "impostor": "Something you find in the desert"
+    },
+    {
+      "normal": "A fruit that is red",
+      "impostor": "A fruit that is yellow"
+    },
+    {
+      "normal": "Something cold",
+      "impostor": "Something hot"
+    },
+    {
+      "normal": "A pet people love",
+      "impostor": "A wild animal"
+    },
+    {
+      "normal": "Something you wear on your head",
+      "impostor": "Something you wear on your feet"
+    },
+    {
+      "normal": "A breakfast food",
+      "impostor": "A dinner food"
+    },
+    {
+      "normal": "Something in a kitchen",
+      "impostor": "Something in a bathroom"
+    },
+    {
+      "normal": "A sport with a ball",
+      "impostor": "A sport without a ball"
+    },
+    {
+      "normal": "Something that flies",
+      "impostor": "Something that swims"
+    },
+    {
+      "normal": "A musical instrument",
+      "impostor": "A tool for building"
+    }
+  ]
+}
