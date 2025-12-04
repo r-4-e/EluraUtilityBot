@@ -2411,65 +2411,74 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
     embed = None
     
     if action == "warn":
-        case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
-        
-        try:
-            dm_embed = create_glass_embed(
-                title=f"{Emojis.WARN} WARNING",
-                description=f"You have been warned in **{guild.name}**\n\n**Reason:** {reason}\n**Case ID:** #{case_id}",
-                color=Colors.WARNING
-            )
-            await target.send(embed=dm_embed)
-        except:
-            pass
-        
-        embed = create_neon_embed(
-            title=f"{Emojis.WARN} USER WARNED",
-            description=f"**Target:** {target.mention}\n**Moderator:** {user.mention}\n**Reason:** {reason}\n**Case ID:** #{case_id}",
-            color=Colors.WARNING
-        )
-        
-    elif action == "unwarn":
-        punishments = load_json("punishments.json")
-        user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
-        
-        if not user_warnings:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} NO WARNINGS",
-                description=f"{target.mention} has no active warnings!",
-                color=Colors.ERROR
-            )
-        else:
-            latest_warning = user_warnings[-1]
-            for case in punishments["cases"]:
-                if case["id"] == latest_warning["id"]:
-                    case["active"] = False
-                    break
-            save_json("punishments.json", punishments)
-            
-            embed = create_neon_embed(
-                title=f"{Emojis.CHECK} WARNING REMOVED",
-                description=f"Removed warning #{latest_warning['id']} from {target.mention}",
-                color=Colors.SUCCESS
-            )
+    case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
     
-    elif action == "warnings":
-        punishments = load_json("punishments.json")
-        user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
+    # DM the user
+    try:
+        dm_embed = discord.Embed(
+            title="⚠️ You have been warned!",
+            description=f"You have received a warning in **{guild.name}**.",
+            color=0xFFA500
+        )
+        dm_embed.add_field(name="Reason", value=reason, inline=False)
+        dm_embed.add_field(name="Case ID", value=f"#{case_id}", inline=False)
+        dm_embed.set_footer(text="Please adhere to the server rules to avoid further actions.")
+        await target.send(embed=dm_embed)
+    except:
+        pass
+    
+    # Confirmation embed in channel
+    embed = discord.Embed(
+        title="⚠️ User Warned",
+        description=f"{target.mention} has been warned.",
+        color=0xFFA500
+    )
+    embed.add_field(name="Moderator", value=user.mention, inline=True)
+    embed.add_field(name="Reason", value=reason, inline=True)
+    embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
+
+elif action == "unwarn":
+    punishments = load_json("punishments.json")
+    user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
+    
+    if not user_warnings:
+        embed = discord.Embed(
+            title="✅ No Active Warnings",
+            description=f"{target.mention} has no active warnings.",
+            color=0x00FF00
+        )
+    else:
+        latest_warning = user_warnings[-1]
+        for case in punishments["cases"]:
+            if case["id"] == latest_warning["id"]:
+                case["active"] = False
+                break
+        save_json("punishments.json", punishments)
         
-        if not user_warnings:
-            embed = create_glass_embed(
-                title=f"{Emojis.CHECK} NO WARNINGS",
-                description=f"{target.mention} has no active warnings!",
-                color=Colors.SUCCESS
-            )
-        else:
-            warnings_text = "\n".join([f"**#{w['id']}** - {w['reason'][:50]}" for w in user_warnings])
-            embed = create_glass_embed(
-                title=f"{Emojis.WARN} WARNINGS ({len(user_warnings)})",
-                description=f"**User:** {target.mention}\n\n{warnings_text}",
-                color=Colors.WARNING
-            )
+        embed = discord.Embed(
+            title="✅ Warning Removed",
+            description=f"Removed warning #{latest_warning['id']} from {target.mention}.",
+            color=0x00FF00
+        )
+
+elif action == "warnings":
+    punishments = load_json("punishments.json")
+    user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
+    
+    if not user_warnings:
+        embed = discord.Embed(
+            title="✅ No Active Warnings",
+            description=f"{target.mention} has no active warnings.",
+            color=0x00FF00
+        )
+    else:
+        embed = discord.Embed(
+            title=f"⚠️ Warnings ({len(user_warnings)})",
+            description=f"Active warnings for {target.mention}:",
+            color=0xFFA500
+        )
+        for w in user_warnings:
+            embed.add_field(name=f"Case #{w['id']}", value=w['reason'], inline=False)
     
     elif action == "mute":
         timeout_duration = timedelta(minutes=duration or 10)
