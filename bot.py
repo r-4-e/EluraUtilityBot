@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 import re
 import subprocess
 import sys
+import tempfile
+import shutil
 
 load_dotenv()
 
@@ -233,16 +235,31 @@ def load_json(filename: str) -> dict:
         return {}
 
 def save_json(filename: str, data: dict):
-    """Save JSON file atomically"""
-    with open(filename, 'w') as f:
-        json.dump(data, f, indent=2)
+    """Save JSON file atomically using temp file + rename"""
+    dir_name = os.path.dirname(filename) or '.'
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix='.tmp', dir=dir_name)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            shutil.move(tmp_path, filename)
+        except:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+    except Exception as e:
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=2)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # COMMAND LOCKS (Zero Duplicate Response Policy)
 # ══════════════════════════════════════════════════════════════════════════════
 
 command_locks: Dict[str, asyncio.Lock] = {}
-idempotency_tokens: Dict[str, set] = {}
+interaction_tokens: Dict[str, float] = {}
+IDEMPOTENCY_EXPIRY = 300
 
 def get_command_lock(command_name: str) -> asyncio.Lock:
     """Get or create a lock for a specific command"""
@@ -250,16 +267,46 @@ def get_command_lock(command_name: str) -> asyncio.Lock:
         command_locks[command_name] = asyncio.Lock()
     return command_locks[command_name]
 
+def generate_idempotency_token(interaction: discord.Interaction, action: str = "") -> str:
+    """Generate unique token for interaction"""
+    return f"{interaction.id}_{interaction.user.id}_{action}"
+
 def check_idempotency(token: str) -> bool:
-    """Check if an idempotency token has been used"""
-    if token in idempotency_tokens.get("used", set()):
+    """Check if an idempotency token has been used. Returns True if action should proceed."""
+    current_time = time.time()
+    
+    expired = [k for k, v in interaction_tokens.items() if current_time - v > IDEMPOTENCY_EXPIRY]
+    for k in expired:
+        del interaction_tokens[k]
+    
+    if token in interaction_tokens:
         return False
-    if "used" not in idempotency_tokens:
-        idempotency_tokens["used"] = set()
-    idempotency_tokens["used"].add(token)
-    if len(idempotency_tokens["used"]) > 10000:
-        idempotency_tokens["used"] = set(list(idempotency_tokens["used"])[-5000:])
+    
+    interaction_tokens[token] = current_time
+    
+    if len(interaction_tokens) > 10000:
+        sorted_tokens = sorted(interaction_tokens.items(), key=lambda x: x[1])
+        interaction_tokens.clear()
+        interaction_tokens.update(dict(sorted_tokens[-5000:]))
+    
     return True
+
+async def safe_interaction_response(interaction: discord.Interaction, action: str, **kwargs) -> bool:
+    """Safely respond to interaction with idempotency check. Returns True if responded."""
+    token = generate_idempotency_token(interaction, action)
+    if not check_idempotency(token):
+        return False
+    
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(**kwargs)
+        else:
+            await interaction.followup.send(**kwargs)
+        return True
+    except discord.errors.InteractionResponded:
+        return False
+    except Exception:
+        return False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PREMIUM UI BUILDERS
@@ -1063,6 +1110,8 @@ class BlackjackView(discord.ui.View):
         self.dealer_hand = dealer_hand
         self.deck = self.create_deck()
         self.game_over = False
+        self.session_id = str(uuid.uuid4())[:8]
+        self.processed_actions: set = set()
         
     def create_deck(self):
         suits = ["♠", "♥", "♦", "♣"]
@@ -1161,6 +1210,15 @@ class BlackjackView(discord.ui.View):
     
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, emoji="🃏")
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        action_token = f"{self.session_id}_hit_{interaction.id}"
+        if action_token in self.processed_actions or self.game_over:
+            try:
+                await interaction.response.defer()
+            except:
+                pass
+            return
+        self.processed_actions.add(action_token)
+        
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your game!", ephemeral=True)
             return
@@ -1178,6 +1236,15 @@ class BlackjackView(discord.ui.View):
     
     @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary, emoji="✋")
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        action_token = f"{self.session_id}_stand_{interaction.id}"
+        if action_token in self.processed_actions or self.game_over:
+            try:
+                await interaction.response.defer()
+            except:
+                pass
+            return
+        self.processed_actions.add(action_token)
+        
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your game!", ephemeral=True)
             return
@@ -1199,6 +1266,15 @@ class BlackjackView(discord.ui.View):
     
     @discord.ui.button(label="Double Down", style=discord.ButtonStyle.success, emoji="💰")
     async def double_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        action_token = f"{self.session_id}_double_{interaction.id}"
+        if action_token in self.processed_actions or self.game_over:
+            try:
+                await interaction.response.defer()
+            except:
+                pass
+            return
+        self.processed_actions.add(action_token)
+        
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your game!", ephemeral=True)
             return
@@ -1286,6 +1362,8 @@ class CrashView(discord.ui.View):
         self.crashed = False
         self.cashed_out = False
         self.crash_point = self.generate_crash_point()
+        self.session_id = str(uuid.uuid4())[:8]
+        self.cashout_lock = asyncio.Lock()
         
     def generate_crash_point(self):
         r = random.random()
@@ -1297,10 +1375,15 @@ class CrashView(discord.ui.View):
             await interaction.response.send_message("This isn't your game!", ephemeral=True)
             return
         
-        if self.crashed or self.cashed_out:
-            return
-        
-        self.cashed_out = True
+        async with self.cashout_lock:
+            if self.crashed or self.cashed_out:
+                try:
+                    await interaction.response.defer()
+                except:
+                    pass
+                return
+            
+            self.cashed_out = True
         winnings = int(self.bet * self.multiplier)
         profit = winnings - self.bet
         
@@ -1779,11 +1862,13 @@ class GTWVotingView(discord.ui.View):
         self.impostor_id = impostor_id
         self.votes: Dict[int, int] = {}
         self.voted_users: set = set()
+        self.vote_lock = asyncio.Lock()
+        self.processed_interactions: set = set()
         
         for player in players:
             button = discord.ui.Button(
                 label=player.display_name[:20],
-                custom_id=f"gtw_vote_{session_id}_{player.id}",
+                custom_id=f"gtw_vote_{session_id}_{player.id}_{uuid.uuid4().hex[:6]}",
                 style=discord.ButtonStyle.secondary
             )
             button.callback = self.create_vote_callback(player.id)
@@ -1791,23 +1876,38 @@ class GTWVotingView(discord.ui.View):
     
     def create_vote_callback(self, target_id: int):
         async def callback(interaction: discord.Interaction):
-            if interaction.user.id in self.voted_users:
-                await interaction.response.send_message("You already voted!", ephemeral=True)
-                return
-            if interaction.user.id == target_id:
-                await interaction.response.send_message("You can't vote for yourself!", ephemeral=True)
-                return
-            if interaction.user.id not in [p.id for p in self.players]:
-                await interaction.response.send_message("You're not in this game!", ephemeral=True)
-                return
+            interaction_token = f"{self.session_id}_{interaction.user.id}_{interaction.id}"
+            error_msg = None
+            success = False
+            should_stop = False
             
-            self.voted_users.add(interaction.user.id)
-            self.votes[target_id] = self.votes.get(target_id, 0) + 1
+            async with self.vote_lock:
+                if interaction_token in self.processed_interactions:
+                    try:
+                        await interaction.response.defer()
+                    except:
+                        pass
+                    return
+                
+                if interaction.user.id in self.voted_users:
+                    error_msg = "You already voted!"
+                elif interaction.user.id == target_id:
+                    error_msg = "You can't vote for yourself!"
+                elif interaction.user.id not in [p.id for p in self.players]:
+                    error_msg = "You're not in this game!"
+                else:
+                    self.processed_interactions.add(interaction_token)
+                    self.voted_users.add(interaction.user.id)
+                    self.votes[target_id] = self.votes.get(target_id, 0) + 1
+                    success = True
+                    should_stop = len(self.voted_users) >= len(self.players)
             
-            await interaction.response.send_message(f"You voted for <@{target_id}>!", ephemeral=True)
-            
-            if len(self.voted_users) >= len(self.players):
-                self.stop()
+            if error_msg:
+                await interaction.response.send_message(error_msg, ephemeral=True)
+            elif success:
+                await interaction.response.send_message(f"You voted for <@{target_id}>!", ephemeral=True)
+                if should_stop:
+                    self.stop()
         return callback
 
 async def gtw_handler(ctx_or_interaction, players: List[discord.Member] = None):
@@ -2868,6 +2968,8 @@ class ElectionVoteView(discord.ui.View):
     def __init__(self, candidates: List[dict]):
         super().__init__(timeout=None)
         self.candidates = candidates
+        self.vote_lock = asyncio.Lock()
+        self.session_id = str(uuid.uuid4())[:8]
         
         options = []
         for candidate in candidates:
@@ -2880,43 +2982,47 @@ class ElectionVoteView(discord.ui.View):
         select = discord.ui.Select(
             placeholder="Cast your vote...",
             options=options,
-            custom_id="election_vote_select"
+            custom_id=f"election_vote_select_{self.session_id}"
         )
         select.callback = self.vote_callback
         self.add_item(select)
     
     async def vote_callback(self, interaction: discord.Interaction):
-        election = load_json("election.json")
+        error_msg = None
+        success = False
         
-        if not election["active"]:
-            await interaction.response.send_message("This election has ended!", ephemeral=True)
-            return
+        async with self.vote_lock:
+            election = load_json("election.json")
+            
+            if not election["active"]:
+                error_msg = "This election has ended!"
+            elif interaction.user.id in election["voters"]:
+                error_msg = "You have already voted in this election!"
+            else:
+                roles_data = load_json("roles.json")
+                user_role_ids = [str(r.id) for r in interaction.user.roles]
+                is_restricted = any(rid in user_role_ids for rid in roles_data["restricted_voters"])
+                
+                if is_restricted:
+                    error_msg = "You are not eligible to vote!"
+                else:
+                    candidate_id = interaction.data["values"][0]
+                    
+                    if candidate_id not in election["votes"]:
+                        election["votes"][candidate_id] = 0
+                    election["votes"][candidate_id] += 1
+                    election["voters"].append(interaction.user.id)
+                    
+                    save_json("election.json", election)
+                    success = True
         
-        if interaction.user.id in election["voters"]:
-            await interaction.response.send_message("You have already voted in this election!", ephemeral=True)
-            return
-        
-        roles_data = load_json("roles.json")
-        user_role_ids = [str(r.id) for r in interaction.user.roles]
-        is_restricted = any(rid in user_role_ids for rid in roles_data["restricted_voters"])
-        
-        if is_restricted:
-            await interaction.response.send_message("You are not eligible to vote!", ephemeral=True)
-            return
-        
-        candidate_id = interaction.data["values"][0]
-        
-        if candidate_id not in election["votes"]:
-            election["votes"][candidate_id] = 0
-        election["votes"][candidate_id] += 1
-        election["voters"].append(interaction.user.id)
-        
-        save_json("election.json", election)
-        
-        await interaction.response.send_message(
-            f"{Emojis.CHECK} Your vote has been recorded!",
-            ephemeral=True
-        )
+        if error_msg:
+            await interaction.response.send_message(error_msg, ephemeral=True)
+        elif success:
+            await interaction.response.send_message(
+                f"{Emojis.CHECK} Your vote has been recorded!",
+                ephemeral=True
+            )
 
 async def election_handler(ctx_or_interaction, action: str):
     """Unified election handler"""
@@ -3242,48 +3348,53 @@ class BillVoteView(discord.ui.View):
     def __init__(self, bill_id: int):
         super().__init__(timeout=None)
         self.bill_id = bill_id
+        self.vote_lock = asyncio.Lock()
+        self.session_id = str(uuid.uuid4())[:8]
     
-    @discord.ui.button(label="Aye", style=discord.ButtonStyle.success, emoji="✅", custom_id="bill_aye")
+    @discord.ui.button(label="Aye", style=discord.ButtonStyle.success, emoji="✅")
     async def vote_aye(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.process_vote(interaction, "aye")
     
-    @discord.ui.button(label="Nay", style=discord.ButtonStyle.danger, emoji="❌", custom_id="bill_nay")
+    @discord.ui.button(label="Nay", style=discord.ButtonStyle.danger, emoji="❌")
     async def vote_nay(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.process_vote(interaction, "nay")
     
-    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.secondary, emoji="⬜", custom_id="bill_abstain")
+    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.secondary, emoji="⬜")
     async def vote_abstain(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.process_vote(interaction, "abstain")
     
     async def process_vote(self, interaction: discord.Interaction, vote_type: str):
-        bills = load_json("bills.json")
+        error_msg = None
+        success = False
         
-        bill = None
-        for b in bills["bills"]:
-            if b["id"] == self.bill_id:
-                bill = b
-                break
+        async with self.vote_lock:
+            bills = load_json("bills.json")
+            
+            bill = None
+            for b in bills["bills"]:
+                if b["id"] == self.bill_id:
+                    bill = b
+                    break
+            
+            if not bill:
+                error_msg = "Bill not found!"
+            elif bill["status"] != "voting":
+                error_msg = "Voting on this bill has ended!"
+            elif interaction.user.id in bill["voters"]:
+                error_msg = "You have already voted on this bill!"
+            else:
+                bill["votes"][vote_type] += 1
+                bill["voters"].append(interaction.user.id)
+                save_json("bills.json", bills)
+                success = True
         
-        if not bill:
-            await interaction.response.send_message("Bill not found!", ephemeral=True)
-            return
-        
-        if bill["status"] != "voting":
-            await interaction.response.send_message("Voting on this bill has ended!", ephemeral=True)
-            return
-        
-        if interaction.user.id in bill["voters"]:
-            await interaction.response.send_message("You have already voted on this bill!", ephemeral=True)
-            return
-        
-        bill["votes"][vote_type] += 1
-        bill["voters"].append(interaction.user.id)
-        save_json("bills.json", bills)
-        
-        await interaction.response.send_message(
-            f"{Emojis.CHECK} You voted **{vote_type.upper()}** on Bill #{self.bill_id}!",
-            ephemeral=True
-        )
+        if error_msg:
+            await interaction.response.send_message(error_msg, ephemeral=True)
+        elif success:
+            await interaction.response.send_message(
+                f"{Emojis.CHECK} You voted **{vote_type.upper()}** on Bill #{self.bill_id}!",
+                ephemeral=True
+            )
 
 async def bill_handler(ctx_or_interaction, action: str, title: str = None, content: str = None, bill_id: int = None):
     """Unified bill handler"""
