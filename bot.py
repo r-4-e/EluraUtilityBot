@@ -2613,7 +2613,7 @@ elif action == "softban":
                 color=Colors.ERROR
             )
     
-    if embed:
+if embed:
         if is_slash:
             await ctx_or_interaction.response.send_message(embed=embed)
         else:
