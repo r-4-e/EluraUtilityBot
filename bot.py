@@ -2383,6 +2383,7 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
     
     required_tier = tier_requirements.get(action, 5)
     
+    # --- Validation ---
     if action not in ["unban"]:
         if target is None:
             embed = create_glass_embed(
@@ -2407,10 +2408,10 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
             else:
                 await ctx_or_interaction.send(embed=embed)
             return
-            
+    
     embed = None
 
-    # Make sure target is specified for relevant actions
+    # --- Make sure target exists for certain actions ---
     if target is None and action in ["warn", "unwarn", "warnings", "mute", "unmute", "kick", "softban", "ban"]:
         embed = discord.Embed(
             title="❌ Error",
@@ -2422,84 +2423,77 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
         else:
             await ctx_or_interaction.send(embed=embed)
         return
-        
-if action == "warn":
-    case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
-    
-    # DM the user
-    try:
-        dm_embed = discord.Embed(
-            title="⚠️ You have been warned!",
-            description=f"You have received a warning in **{guild.name}**.",
-            color=0xFFA500
-        )
-        dm_embed.add_field(name="Reason", value=reason, inline=False)
-        dm_embed.add_field(name="Case ID", value=f"#{case_id}", inline=False)
-        dm_embed.set_footer(text="Please adhere to the server rules to avoid further actions.")
-        await target.send(embed=dm_embed)
-    except:
-        pass
-    
-    # Confirmation embed in channel
-    embed = discord.Embed(
-        title="⚠️ User Warned",
-        description=f"{target.mention} has been warned.",
-        color=0xFFA500
-    )
-    embed.add_field(name="Moderator", value=user.mention, inline=True)
-    embed.add_field(name="Reason", value=reason, inline=True)
-    embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
 
-elif action == "unwarn":
-    punishments = load_json("punishments.json")
-    user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
-    
-    if not user_warnings:
-        embed = discord.Embed(
-            title="✅ No Active Warnings",
-            description=f"{target.mention} has no active warnings.",
-            color=0x00FF00
-        )
-    else:
-        latest_warning = user_warnings[-1]
-        for case in punishments["cases"]:
-            if case["id"] == latest_warning["id"]:
-                case["active"] = False
-                break
-        save_json("punishments.json", punishments)
+    # --- Action Logic ---
+    if action == "warn":
+        case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
+        try:
+            dm_embed = discord.Embed(
+                title="⚠️ You have been warned!",
+                description=f"You have received a warning in **{guild.name}**.",
+                color=0xFFA500
+            )
+            dm_embed.add_field(name="Reason", value=reason, inline=False)
+            dm_embed.add_field(name="Case ID", value=f"#{case_id}", inline=False)
+            dm_embed.set_footer(text="Please adhere to the server rules to avoid further actions.")
+            await target.send(embed=dm_embed)
+        except:
+            pass
         
         embed = discord.Embed(
-            title="✅ Warning Removed",
-            description=f"Removed warning #{latest_warning['id']} from {target.mention}.",
-            color=0x00FF00
-        )
-
-elif action == "warnings":
-    punishments = load_json("punishments.json")
-    user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
-    
-    if not user_warnings:
-        embed = discord.Embed(
-            title="✅ No Active Warnings",
-            description=f"{target.mention} has no active warnings.",
-            color=0x00FF00
-        )
-    else:
-        embed = discord.Embed(
-            title=f"⚠️ Warnings ({len(user_warnings)})",
-            description=f"Active warnings for {target.mention}:",
+            title="⚠️ User Warned",
+            description=f"{target.mention} has been warned.",
             color=0xFFA500
         )
-        for w in user_warnings:
-            embed.add_field(name=f"Case #{w['id']}", value=w['reason'], inline=False)
-    
-elif action == "mute":
+        embed.add_field(name="Moderator", value=user.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=True)
+        embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
+
+    elif action == "unwarn":
+        punishments = load_json("punishments.json")
+        user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
+        if not user_warnings:
+            embed = discord.Embed(
+                title="✅ No Active Warnings",
+                description=f"{target.mention} has no active warnings.",
+                color=0x00FF00
+            )
+        else:
+            latest_warning = user_warnings[-1]
+            for case in punishments["cases"]:
+                if case["id"] == latest_warning["id"]:
+                    case["active"] = False
+                    break
+            save_json("punishments.json", punishments)
+            embed = discord.Embed(
+                title="✅ Warning Removed",
+                description=f"Removed warning #{latest_warning['id']} from {target.mention}.",
+                color=0x00FF00
+            )
+
+    elif action == "warnings":
+        punishments = load_json("punishments.json")
+        user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
+        if not user_warnings:
+            embed = discord.Embed(
+                title="✅ No Active Warnings",
+                description=f"{target.mention} has no active warnings.",
+                color=0x00FF00
+            )
+        else:
+            embed = discord.Embed(
+                title=f"⚠️ Warnings ({len(user_warnings)})",
+                description=f"Active warnings for {target.mention}:",
+                color=0xFFA500
+            )
+            for w in user_warnings:
+                embed.add_field(name=f"Case #{w['id']}", value=w['reason'], inline=False)
+
+    elif action == "mute":
         timeout_duration = timedelta(minutes=duration or 10)
-        
         try:
             await target.timeout(timeout_duration, reason=reason)
             case_id = await create_case(guild.id, user.id, target.id, "MUTE", reason)
-            
             try:
                 dm_embed = create_glass_embed(
                     title=f"{Emojis.CROSS} MUTED",
@@ -2509,7 +2503,6 @@ elif action == "mute":
                 await target.send(embed=dm_embed)
             except:
                 pass
-            
             embed = create_neon_embed(
                 title=f"{Emojis.CROSS} USER MUTED",
                 description=f"**Target:** {target.mention}\n**Duration:** {duration or 10} minutes\n**Moderator:** {user.mention}\n**Reason:** {reason}\n**Case ID:** #{case_id}",
@@ -2520,12 +2513,11 @@ elif action == "mute":
                 title=f"{Emojis.CROSS} FAILED",
                 description="I don't have permission to mute this user!",
                 color=Colors.ERROR
-                            )
-                                      
-elif action == "unmute":
+            )
+
+    elif action == "unmute":
         try:
             await target.timeout(None, reason=f"Unmuted by {user}")
-            
             embed = create_neon_embed(
                 title=f"{Emojis.CHECK} USER UNMUTED",
                 description=f"**Target:** {target.mention}\n**Moderator:** {user.mention}",
@@ -2537,11 +2529,10 @@ elif action == "unmute":
                 description="I don't have permission to unmute this user!",
                 color=Colors.ERROR
             )
-            
-elif action == "kick":
+
+    elif action == "kick":
         try:
             case_id = await create_case(guild.id, user.id, target.id, "KICK", reason)
-            
             try:
                 dm_embed = create_glass_embed(
                     title=f"{Emojis.SWORD} KICKED",
@@ -2551,9 +2542,7 @@ elif action == "kick":
                 await target.send(embed=dm_embed)
             except:
                 pass
-            
             await target.kick(reason=reason)
-            
             embed = create_neon_embed(
                 title=f"{Emojis.SWORD} USER KICKED",
                 description=f"**Target:** {target.mention} ({target.id})\n**Moderator:** {user.mention}\n**Reason:** {reason}\n**Case ID:** #{case_id}",
@@ -2565,11 +2554,10 @@ elif action == "kick":
                 description="I don't have permission to kick this user!",
                 color=Colors.ERROR
             )
-    
-elif action == "ban":
+
+    elif action == "ban":
         try:
             case_id = await create_case(guild.id, user.id, target.id, "BAN", reason)
-            
             try:
                 dm_embed = create_glass_embed(
                     title=f"{Emojis.GAVEL} BANNED",
@@ -2579,9 +2567,7 @@ elif action == "ban":
                 await target.send(embed=dm_embed)
             except:
                 pass
-            
             await target.ban(reason=reason, delete_message_days=0)
-            
             embed = create_neon_embed(
                 title=f"{Emojis.GAVEL} USER BANNED",
                 description=f"**Target:** {target.mention} ({target.id})\n**Moderator:** {user.mention}\n**Reason:** {reason}\n**Case ID:** #{case_id}",
@@ -2593,14 +2579,12 @@ elif action == "ban":
                 description="I don't have permission to ban this user!",
                 color=Colors.ERROR
             )
-    
-elif action == "softban":
+
+    elif action == "softban":
         try:
             case_id = await create_case(guild.id, user.id, target.id, "SOFTBAN", reason)
-            
             await target.ban(reason=f"Softban: {reason}", delete_message_days=7)
             await guild.unban(target, reason="Softban unban")
-            
             embed = create_neon_embed(
                 title=f"{Emojis.GAVEL} USER SOFTBANNED",
                 description=f"**Target:** {target.mention} ({target.id})\n**Moderator:** {user.mention}\n**Reason:** {reason}\n**Case ID:** #{case_id}\n\n*User's messages deleted, user can rejoin.*",
@@ -2612,8 +2596,9 @@ elif action == "softban":
                 description="I don't have permission to softban this user!",
                 color=Colors.ERROR
             )
-    
-if embed:
+
+    # --- Send the final embed ---
+    if embed:
         if is_slash:
             await ctx_or_interaction.response.send_message(embed=embed)
         else:
