@@ -2537,8 +2537,8 @@ elif action == "unmute":
                 description="I don't have permission to unmute this user!",
                 color=Colors.ERROR
             )
-    
-    elif action == "kick":
+            
+elif action == "kick":
         try:
             case_id = await create_case(guild.id, user.id, target.id, "KICK", reason)
             
@@ -2566,7 +2566,7 @@ elif action == "unmute":
                 color=Colors.ERROR
             )
     
-    elif action == "ban":
+elif action == "ban":
         try:
             case_id = await create_case(guild.id, user.id, target.id, "BAN", reason)
             
@@ -2594,7 +2594,7 @@ elif action == "unmute":
                 color=Colors.ERROR
             )
     
-    elif action == "softban":
+elif action == "softban":
         try:
             case_id = await create_case(guild.id, user.id, target.id, "SOFTBAN", reason)
             
