@@ -2410,7 +2410,7 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
     
     embed = None
 
-    # Make sure target is specified
+     # Make sure target is specified
 if target is None:
     embed = discord.Embed(
         title="❌ Error",
@@ -2493,7 +2493,7 @@ elif action == "warnings":
         for w in user_warnings:
             embed.add_field(name=f"Case #{w['id']}", value=w['reason'], inline=False)
     
-    elif action == "mute":
+elif action == "mute":
         timeout_duration = timedelta(minutes=duration or 10)
         
         try:
@@ -2520,9 +2520,9 @@ elif action == "warnings":
                 title=f"{Emojis.CROSS} FAILED",
                 description="I don't have permission to mute this user!",
                 color=Colors.ERROR
-            )
-    
-    elif action == "unmute":
+                            )
+                                      
+elif action == "unmute":
         try:
             await target.timeout(None, reason=f"Unmuted by {user}")
             
