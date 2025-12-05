@@ -2410,19 +2410,19 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
             
     embed = None
 
-    # Make sure target is specified (inside handler)
+    # Make sure target is specified for relevant actions
     if target is None and action in ["warn", "unwarn", "warnings", "mute", "unmute", "kick", "softban", "ban"]:
         embed = discord.Embed(
             title="❌ Error",
             description="Please specify a user to warn/unwarn/check warnings!",
             color=0xFF0000
         )
-        if isinstance(ctx_or_interaction, discord.Interaction):
+        if is_slash:
             await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await ctx_or_interaction.send(embed=embed)
         return
-
+        
 if action == "warn":
     case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
     
@@ -2618,7 +2618,7 @@ if embed:
             await ctx_or_interaction.response.send_message(embed=embed)
         else:
             await ctx_or_interaction.send(embed=embed)
-
+            
 # Punishment Slash Commands
 @bot.tree.command(name="warn", description="Warn a user")
 @app_commands.describe(target="User to warn", reason="Reason for warning")
@@ -2708,7 +2708,7 @@ async def ban_prefix(ctx, target: discord.Member = None, *, reason: str = "No re
 async def softban_prefix(ctx, target: discord.Member = None, *, reason: str = "No reason provided"):
     async with get_command_lock("softban"):
         await punishment_handler(ctx, "softban", target, reason)
-
+           
 # ══════════════════════════════════════════════════════════════════════════════
 # POLITICAL PARTY SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
