@@ -1,44 +1,102 @@
 {
   "prompts": [
-    {
-      "normal": "Something you find at the beach",
-      "impostor": "Something you find in the desert"
-    },
-    {
-      "normal": "A fruit that is red",
-      "impostor": "A fruit that is yellow"
-    },
-    {
-      "normal": "Something cold",
-      "impostor": "Something hot"
-    },
-    {
-      "normal": "A pet people love",
-      "impostor": "A wild animal"
-    },
-    {
-      "normal": "Something you wear on your head",
-      "impostor": "Something you wear on your feet"
-    },
-    {
-      "normal": "A breakfast food",
-      "impostor": "A dinner food"
-    },
-    {
-      "normal": "Something in a kitchen",
-      "impostor": "Something in a bathroom"
-    },
-    {
-      "normal": "A sport with a ball",
-      "impostor": "A sport without a ball"
-    },
-    {
-      "normal": "Something that flies",
-      "impostor": "Something that swims"
-    },
-    {
-      "normal": "A musical instrument",
-      "impostor": "A tool for building"
-    }
+    { "normal": "Something you drink", "impostor": "Something you chew" },
+    { "normal": "A thing that glows", "impostor": "A thing that makes noise" },
+    { "normal": "Something found in a park", "impostor": "Something found in a hospital" },
+    { "normal": "A vehicle with wheels", "impostor": "A vehicle without wheels" },
+    { "normal": "Something soft", "impostor": "Something hard" },
+    { "normal": "A green vegetable", "impostor": "A purple vegetable" },
+    { "normal": "Something that melts", "impostor": "Something that freezes" },
+    { "normal": "A farm animal", "impostor": "A jungle animal" },
+    { "normal": "Something you can write with", "impostor": "Something you can cut with" },
+    { "normal": "A type of tree", "impostor": "A type of flower" },
+
+    { "normal": "Something that uses electricity", "impostor": "Something that uses fuel" },
+    { "normal": "A mode of transport on water", "impostor": "A mode of transport on land" },
+    { "normal": "Something that smells good", "impostor": "Something that smells bad" },
+    { "normal": "A loud sound", "impostor": "A quiet sound" },
+    { "normal": "Something made of glass", "impostor": "Something made of paper" },
+    { "normal": "A round object", "impostor": "A square object" },
+    { "normal": "A type of candy", "impostor": "A type of vegetable" },
+    { "normal": "A tool for cleaning", "impostor": "A tool for cooking" },
+    { "normal": "Something that grows", "impostor": "Something that breaks" },
+    { "normal": "A thing that floats", "impostor": "A thing that sinks" },
+
+    { "normal": "Something you can eat raw", "impostor": "Something you must cook" },
+    { "normal": "A yellow object", "impostor": "A blue object" },
+    { "normal": "A type of bird", "impostor": "A type of fish" },
+    { "normal": "A small object", "impostor": "A large object" },
+    { "normal": "Something you find in a school", "impostor": "Something you find in a garden" },
+    { "normal": "A holiday decoration", "impostor": "A household tool" },
+    { "normal": "A type of shoe", "impostor": "A type of hat" },
+    { "normal": "Something that spins", "impostor": "Something that slides" },
+    { "normal": "A type of drink", "impostor": "A type of dessert" },
+    { "normal": "Something with a screen", "impostor": "Something with wheels" },
+
+    { "normal": "A metal object", "impostor": "A wooden object" },
+    { "normal": "Something you plug in", "impostor": "Something powered by batteries" },
+    { "normal": "A game you play indoors", "impostor": "A game you play outdoors" },
+    { "normal": "A type of insect", "impostor": "A type of reptile" },
+    { "normal": "Something found in space", "impostor": "Something found under the sea" },
+    { "normal": "A type of toy", "impostor": "A type of tool" },
+    { "normal": "A spicy food", "impostor": "A sweet food" },
+    { "normal": "Something sticky", "impostor": "Something slippery" },
+    { "normal": "A thing with wheels", "impostor": "A thing with wings" },
+    { "normal": "Something used for art", "impostor": "Something used for science" },
+
+    { "normal": "A type of clothing", "impostor": "A type of appliance" },
+    { "normal": "Something bright", "impostor": "Something dull" },
+    { "normal": "A type of pasta", "impostor": "A type of fruit" },
+    { "normal": "Something that burns", "impostor": "Something that cools" },
+    { "normal": "A slow animal", "impostor": "A fast animal" },
+    { "normal": "A thing you can stack", "impostor": "A thing you can fold" },
+    { "normal": "A type of car", "impostor": "A type of bicycle" },
+    { "normal": "Something that shakes", "impostor": "Something that lights up" },
+    { "normal": "A food that is crunchy", "impostor": "A food that is soft" },
+    { "normal": "A tool used outdoors", "impostor": "A tool used indoors" },
+
+    { "normal": "Something that rolls", "impostor": "Something that bounces" },
+    { "normal": "A sweet drink", "impostor": "A bitter drink" },
+    { "normal": "A thing used at night", "impostor": "A thing used in the morning" },
+    { "normal": "Something you read", "impostor": "Something you listen to" },
+    { "normal": "A mode of public transport", "impostor": "A private vehicle" },
+    { "normal": "A type of bag", "impostor": "A type of box" },
+    { "normal": "Something you cut", "impostor": "Something you tie" },
+    { "normal": "A heavy object", "impostor": "A light object" },
+    { "normal": "Something made of plastic", "impostor": "Something made of stone" },
+    { "normal": "A type of flower", "impostor": "A type of fruit" },
+
+    { "normal": "A winter item", "impostor": "A summer item" },
+    { "normal": "Something found in a car", "impostor": "Something found in a restaurant" },
+    { "normal": "A famous building", "impostor": "A famous mountain" },
+    { "normal": "Something that flashes", "impostor": "Something that beeps" },
+    { "normal": "A type of cheese", "impostor": "A type of bread" },
+    { "normal": "Something you lock", "impostor": "Something you open" },
+    { "normal": "A fruit with seeds", "impostor": "A fruit without seeds" },
+    { "normal": "A tool for measuring", "impostor": "A tool for cooking" },
+    { "normal": "A type of boat", "impostor": "A type of airplane" },
+    { "normal": "Something that vibrates", "impostor": "Something that rotates" },
+
+    { "normal": "A pet you keep in an aquarium", "impostor": "A pet you keep in a cage" },
+    { "normal": "Something used for music", "impostor": "Something used for sports" },
+    { "normal": "A type of nut", "impostor": "A type of berry" },
+    { "normal": "A thing you recycle", "impostor": "A thing you throw away" },
+    { "normal": "A type of chair", "impostor": "A type of table" },
+    { "normal": "A food that is liquid", "impostor": "A food that is solid" },
+    { "normal": "Something with a motor", "impostor": "Something with no motor" },
+    { "normal": "A room in a house", "impostor": "A place in a city" },
+    { "normal": "A type of cookie", "impostor": "A type of soup" },
+    { "normal": "A long object", "impostor": "A short object" },
+
+    { "normal": "A thing that makes bubbles", "impostor": "A thing that makes dust" },
+    { "normal": "A patterned object", "impostor": "A plain object" },
+    { "normal": "A straight object", "impostor": "A curved object" },
+    { "normal": "A thing that clicks", "impostor": "A thing that rings" },
+    { "normal": "Something inflatable", "impostor": "Something foldable" },
+    { "normal": "Something edible", "impostor": "Something not edible" },
+    { "normal": "Something colorful", "impostor": "Something colorless" },
+    { "normal": "A type of jacket", "impostor": "A type of shoe" },
+    { "normal": "A type of grain", "impostor": "A type of spice" },
+    { "normal": "Something with buttons", "impostor": "Something with a zipper" }
   ]
-}
+    }
