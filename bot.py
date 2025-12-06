@@ -1849,7 +1849,7 @@ async def hangman_prefix(ctx):
         await hangman_handler(ctx)
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
 import random
@@ -1857,469 +1857,546 @@ import uuid
 import time
 from typing import List, Dict
 
-# ------------------------- Global Data -------------------------
-gtw_sessions: Dict[int, dict] = {}
-user_economy: Dict[int, dict] = {}  # Example wallet/leaderboard
+# ------------------------- GTW Manager -------------------------
+class GTWManager:
+    def __init__(self, bot):
+        self.bot = bot
+        self.lobbies: Dict[str, dict] = {}  # code -> lobby data
+        self.cooldowns: Dict[int, float] = {}  # user_id -> last create time
+        self.lobby_timeout = 600  # 10 minutes auto-delete
+        self.cleanup_task.start()
 
-# ---------------------- Helper Functions ----------------------
+    # ----------------- Lobby Management -----------------
+    def generate_code(self, length=4):
+        return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=length))
 
-def load_json(file_path):
-    import json
-    with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    async def create_lobby(self, host: discord.Member, channel: discord.TextChannel):
+        now = time.time()
+        if host.id in self.cooldowns and now - self.cooldowns[host.id] < 60:
+            return None, f"⏳ You must wait before creating another lobby!"
+        code = self.generate_code()
+        self.cooldowns[host.id] = now
+        self.lobbies[code] = {
+            "host": host.id,
+            "channel": channel.id,
+            "players": [host.id],
+            "started": False,
+            "prompts": [],
+            "round": 1,
+            "max_rounds": 3,
+            "answers": {},
+            "impostors": [],
+            "message_id": None,
+            "created_at": now
+        }
+        return code, f"🎮 Lobby created! Code: `{code}`. Host: {host.display_name}"
 
-def save_json(file_path, data):
-    import json
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+    async def join_lobby(self, user: discord.Member, code: str):
+        lobby = self.lobbies.get(code)
+        if not lobby:
+            return f"❌ Lobby `{code}` not found."
+        if lobby["started"]:
+            return f"❌ Lobby `{code}` has already started."
+        if user.id in lobby["players"]:
+            return f"❌ You are already in this lobby."
+        lobby["players"].append(user.id)
+        return f"✅ {user.display_name} joined lobby `{code}`!"
 
-def get_user_economy(user_id: int):
-    if user_id not in user_economy:
-        user_economy[user_id] = {"wallet": 0, "total_earned": 0}
-    return user_economy[user_id]
+    async def start_lobby(self, code: str):
+        lobby = self.lobbies.get(code)
+        if not lobby or lobby["started"]:
+            return False
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
 
-def update_user_economy(user_id: int, data: dict):
-    user_economy[user_id] = data
+        if len(players) < 3:
+            await channel.send("⚠️ Need at least **3 players** to start the game.")
+            return False
 
-def create_embed(title, description, color=0x3498DB):
-    return discord.Embed(title=title, description=f"```{description}```", color=color)
+        num_players = len(players)
+        impostor_count = 1 if num_players <= 5 else 1 + (num_players - 5) // 4
+        impostors = random.sample(players, impostor_count)
+        lobby["impostors"] = [p.id for p in impostors]
 
-# ---------------------- GTW Game ----------------------
+        gtw_words = load_json("gtw_words.json")
+        prompt_pair = random.choice(gtw_words["prompts"])
+        lobby["prompts"] = [prompt_pair]
 
-async def gtw_handler(ctx_or_interaction, players: List[discord.Member]):
-    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
-    channel = ctx_or_interaction.channel
-
-    if len(players) < 3:
-        embed = create_embed("⚠️ GUESS THE WORD", "At least **3 players** required!", 0xE67E22)
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-        return
-
-    session_id = str(uuid.uuid4())[:8]
-    num_players = len(players)
-    impostor_count = 1 if num_players <= 5 else 1 + (num_players - 5) // 4
-    impostors = random.sample(players, impostor_count)
-
-    gtw_words = load_json("gtw_words.json")
-    prompt_pair = random.choice(gtw_words["prompts"])
-
-    session = {
-        "id": session_id,
-        "players": [p.id for p in players],
-        "impostors": [p.id for p in impostors],
-        "prompt_normal": prompt_pair["normal"],
-        "prompt_impostor": prompt_pair["impostor"],
-        "answers": {},
-        "round": 1,
-        "max_rounds": 3,
-        "channel_id": channel.id
-    }
-    gtw_sessions[channel.id] = session
-
-    # DM Prompts
-    for player in players:
-        try:
-            if player in impostors:
-                dm_embed = create_embed("⚠️ YOU ARE THE IMPOSTOR!", f"Your prompt:\n{prompt_pair['impostor']}", 0xE74C3C)
-            else:
-                dm_embed = create_embed("💡 GUESS THE WORD", f"Your prompt:\n{prompt_pair['normal']}", 0x3498DB)
-            await player.send(embed=dm_embed)
-        except:
-            pass
-
-    # Send Game Start Embed
-    embed = create_embed(
-        "🎮 GUESS THE WORD",
-        f"**Session:** {session_id}\n**Players:** {', '.join([p.display_name for p in players])}\n**Rounds:** {session['max_rounds']}\n\nReply to this message with your 1-2 word answers.",
-        0x9B59B6
-    )
-
-    if is_slash:
-        await ctx_or_interaction.response.send_message(embed=embed)
-        msg = await ctx_or_interaction.original_response()
-    else:
-        msg = await ctx_or_interaction.send(embed=embed)
-
-    session["message_id"] = msg.id
-    banned_words = ["best", "worst", "bad", "good", "holiday", "nice", "great", "terrible"]
-
-    # ---------------------- Rounds ----------------------
-    for r in range(1, session["max_rounds"] + 1):
-        round_embed = create_embed(f"Round {r}", f"Prompt: {prompt_pair['normal']}", 0x8E44AD)
-        round_msg = await channel.send(embed=round_embed)
-        session["answers"][r] = {}
-
-        def check(m):
-            return m.reference and m.reference.message_id == round_msg.id and m.author.id in session["players"] \
-                   and 1 <= len(m.content.split()) <= 2 and not any(bw in m.content.lower() for bw in banned_words)
-
-        round_end = time.time() + 90
-        while time.time() < round_end:
+        for p in players:
             try:
-                m = await bot.wait_for("message", check=check, timeout=10)
-                session["answers"][r][m.author.id] = m.content.strip()
+                if p.id in lobby["impostors"]:
+                    embed = create_embed("⚠️ YOU ARE THE IMPOSTOR!", f"Prompt: {prompt_pair['impostor']}", 0xE74C3C)
+                else:
+                    embed = create_embed("💡 GUESS THE WORD", f"Prompt: {prompt_pair['normal']}", 0x3498DB)
+                await p.send(embed=embed)
+            except:
+                pass
+
+        lobby["started"] = True
+        lobby["round"] = 1
+        await self.run_round(code)
+        return True
+
+    # ----------------- Round Logic -----------------
+    async def run_round(self, code: str):
+        lobby = self.lobbies.get(code)
+        if not lobby:
+            return
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
+        prompt_pair = lobby["prompts"][0]
+
+        for r in range(lobby["round"], lobby["max_rounds"] + 1):
+            lobby["round"] = r
+            embed = create_embed(f"Round {r}", f"Prompt: {prompt_pair['normal']}", 0x8E44AD)
+            msg = await channel.send(embed=embed)
+            lobby["answers"][r] = {}
+
+            banned_words = ["best","worst","bad","good","holiday","nice","great","terrible"]
+
+            def check(m):
+                return m.reference and m.reference.message_id == msg.id and m.author.id in lobby["players"] \
+                       and 1 <= len(m.content.split()) <= 2 and not any(bw in m.content.lower() for bw in banned_words)
+
+            round_end = time.time() + 90
+            while time.time() < round_end:
+                try:
+                    m = await self.bot.wait_for("message", check=check, timeout=10)
+                    lobby["answers"][r][m.author.id] = m.content.strip()
+                except asyncio.TimeoutError:
+                    continue
+
+        await self.continue_or_vote(lobby)
+
+    # ----------------- Continue or Vote -----------------
+    async def continue_or_vote(self, lobby):
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
+
+        view = ContinueOrVoteView(lobby["players"])
+        embed = create_embed("⚡ Continue or Vote?", "Majority rules: Continue game or vote on impostor.", 0xF1C40F)
+        msg = await channel.send(embed=embed, view=view)
+        await view.wait()
+
+        continue_count = list(view.choices.values()).count("continue")
+        vote_count = list(view.choices.values()).count("vote")
+
+        if continue_count >= vote_count:
+            await channel.send("✅ Majority chose **Continue**! Starting next round...")
+            lobby["round"] += 1
+            await self.run_round(lobby_code_from_lobby(lobby))
+        else:
+            await self.voting_phase(lobby)
+
+    # ----------------- Voting -----------------
+    async def voting_phase(self, lobby):
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
+
+        view = GTWVotingView(players)
+        embed = create_embed("🗳️ Voting Phase", "Vote for who you think is the impostor!", 0x1ABC9C)
+        msg = await channel.send(embed=embed, view=view)
+        await view.wait()
+
+        if view.votes:
+            max_votes = max(view.votes.values())
+            candidates = [pid for pid, count in view.votes.items() if count == max_votes]
+
+            if len(candidates) > 1:
+                await channel.send("Tie detected! Tie players do RPS fight.")
+                loser = await self.rps(channel, candidates)
+            else:
+                loser = candidates[0]
+
+            if loser in lobby["impostors"]:
+                await channel.send(f"🎉 The impostor <@{loser}> was caught!")
+            else:
+                await channel.send(f"❌ <@{loser}> was eliminated but was not an impostor!")
+
+    # ----------------- RPS -----------------
+    async def rps(self, channel, candidates):
+        moves = {"✊":"rock","✋":"paper","✌️":"scissors"}
+        player_moves = {}
+
+        def check(reaction, user):
+            return user.id in candidates and str(reaction.emoji) in moves
+
+        await channel.send(f"Tie between: {', '.join([f'<@{c}>' for c in candidates])}. React with ✊, ✋, ✌️.")
+
+        while len(player_moves) < len(candidates):
+            try:
+                reaction, user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
+                if user.id not in player_moves:
+                    player_moves[user.id] = moves[str(reaction.emoji)]
+                    await channel.send(f"<@{user.id}> chose {moves[str(reaction.emoji)]}")
             except asyncio.TimeoutError:
-                continue
+                break
 
-    # ---------------------- Continue or Vote ----------------------
-    await gtw_continue_or_vote(channel, session)
+        if len(player_moves) < len(candidates):
+            return random.choice(candidates)
 
-# ---------------------- Continue or Vote ----------------------
+        ids = list(player_moves.keys())
+        m1, m2 = player_moves[ids[0]], player_moves[ids[1]]
+        if m1 == m2:
+            return random.choice(ids)
+        elif (m1,m2) in [("rock","scissors"),("paper","rock"),("scissors","paper")]:
+            return ids[1]
+        else:
+            return ids[0]
+
+    # ----------------- Cleanup -----------------
+    @tasks.loop(seconds=60)
+    async def cleanup_task(self):
+        now = time.time()
+        expired = []
+        for code, lobby in self.lobbies.items():
+            if not lobby["started"] and now - lobby["created_at"] > self.lobby_timeout:
+                expired.append(code)
+                channel = self.bot.get_channel(lobby["channel"])
+                host = self.bot.get_user(lobby["host"])
+                if channel:
+                    await channel.send(f"⌛ Lobby `{code}` created by {host.display_name} expired due to inactivity.")
+        for code in expired:
+            del self.lobbies[code]
+
+# ------------------------- UI Components -------------------------
 class ContinueOrVoteView(discord.ui.View):
-    def __init__(self, session_id, players):
+    def __init__(self, players):
         super().__init__(timeout=60)
-        self.session_id = session_id
-        self.players = players
-        self.choices: Dict[int, str] = {}
-
-        for player in players:
+        self.choices: Dict[int,str] = {}
+        for pid in players:
             continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.success)
             vote_btn = discord.ui.Button(label="Vote", style=discord.ButtonStyle.danger)
-            continue_btn.callback = self.create_callback(player.id, "continue")
-            vote_btn.callback = self.create_callback(player.id, "vote")
+            continue_btn.callback = self.make_callback(pid, "continue")
+            vote_btn.callback = self.make_callback(pid, "vote")
             self.add_item(continue_btn)
             self.add_item(vote_btn)
 
-    def create_callback(self, player_id, choice):
+    def make_callback(self, pid, choice):
         async def callback(interaction: discord.Interaction):
-            if interaction.user.id != player_id:
+            if interaction.user.id != pid:
                 await interaction.response.send_message("This button is not for you.", ephemeral=True)
                 return
-            self.choices[player_id] = choice
+            self.choices[pid] = choice
             await interaction.response.send_message(f"You chose **{choice}**!", ephemeral=True)
-            if len(self.choices) >= len(self.players):
+            if len(self.choices) >= len(self.children)//2:
                 self.stop()
         return callback
 
-async def gtw_continue_or_vote(channel, session):
-    players = [bot.get_user(pid) for pid in session["players"]]
-    view = ContinueOrVoteView(session["id"], players)
-    embed = create_embed("⚡ Continue or Vote?", "Majority decides: Continue game or vote on impostor.", 0xF1C40F)
-    msg = await channel.send(embed=embed, view=view)
-    await view.wait()
-
-    continue_count = list(view.choices.values()).count("continue")
-    vote_count = list(view.choices.values()).count("vote")
-
-    if continue_count >= vote_count:
-        await channel.send("✅ Majority chose **Continue**! Starting next round...")
-        session["round"] += 1
-        await gtw_handler(channel, players)
-    else:
-        await gtw_voting_phase(channel, session)
-
-# ---------------------- Voting Phase ----------------------
 class GTWVotingView(discord.ui.View):
-    def __init__(self, session_id: str, players: List[discord.Member], impostors: List[int]):
+    def __init__(self, players):
         super().__init__(timeout=60)
-        self.session_id = session_id
-        self.players = players
-        self.impostors = impostors
-        self.votes: Dict[int, int] = {}
+        self.votes: Dict[int,int] = {}
         self.voted_users: set = set()
+        for p in players:
+            btn = discord.ui.Button(label=p.display_name[:20], style=discord.ButtonStyle.secondary)
+            btn.callback = self.make_callback(p.id)
+            self.add_item(btn)
 
-        for player in players:
-            button = discord.ui.Button(label=player.display_name[:20], style=discord.ButtonStyle.secondary)
-            button.callback = self.create_vote_callback(player.id)
-            self.add_item(button)
-
-    def create_vote_callback(self, target_id: int):
+    def make_callback(self, target_id):
         async def callback(interaction: discord.Interaction):
             if interaction.user.id in self.voted_users:
                 await interaction.response.send_message("Already voted!", ephemeral=True)
                 return
-
             self.voted_users.add(interaction.user.id)
-            self.votes[target_id] = self.votes.get(target_id, 0) + 1
+            self.votes[target_id] = self.votes.get(target_id,0)+1
             await interaction.response.send_message(f"You voted for <@{target_id}>!", ephemeral=True)
-
-            if len(self.voted_users) >= len(self.players):
+            if len(self.voted_users) >= len(self.children):
                 self.stop()
         return callback
 
-async def gtw_voting_phase(channel, session):
-    players = [bot.get_user(pid) for pid in session["players"]]
-    view = GTWVotingView(session["id"], players, session["impostors"])
-    embed = create_embed("🗳️ Voting Phase", "Vote for who you think is the impostor!", 0x1ABC9C)
-    vote_msg = await channel.send(embed=embed, view=view)
-    await view.wait()
+# ------------------------- Commands -------------------------
+gtw_manager = None  # Will be set when bot instance is ready
 
-    if view.votes:
-        max_votes = max(view.votes.values())
-        candidates = [pid for pid, count in view.votes.items() if count == max_votes]
+# ----------------- Slash Commands -----------------
+@bot.tree.command(name="gtw_create", description="Create a GTW lobby")
+async def gtw_create(interaction: discord.Interaction):
+    global gtw_manager
+    code, msg = await gtw_manager.create_lobby(interaction.user, interaction.channel)
+    await interaction.response.send_message(msg)
 
-        if len(candidates) > 1:
-            # Tie -> Interactive RPS
-            await channel.send("Tie detected! React with ✊, ✋, ✌️ for RPS to decide.")
-            rps_winner = await gtw_rps(channel, candidates)
-            eliminated_id = rps_winner
+@app_commands.describe(code="Lobby code to join")
+@bot.tree.command(name="gtw_join", description="Join a GTW lobby")
+async def gtw_join(interaction: discord.Interaction, code: str):
+    global gtw_manager
+    msg = await gtw_manager.join_lobby(interaction.user, code.upper())
+    await interaction.response.send_message(msg)
+
+# ----------------- Prefix Commands -----------------
+prefixes = ["eu", "elura"]
+prefix_bot = commands.Bot(command_prefix=prefixes, intents=discord.Intents.all())
+
+@prefix_bot.command(name="gtwcreate")
+async def gtw_create_prefix(ctx):
+    global gtw_manager
+    code, msg = await gtw_manager.create_lobby(ctx.author, ctx.channel)
+    await ctx.send(msg)
+
+@prefix_bot.command(name="gtwjoin")
+async def gtw_join_prefix(ctx, code: str):
+    global gtw_manager
+    msg = await gtw_manager.join_lobby(ctx.author, code.upper())
+    await ctx.send(msg)
+
+# ------------------------- Helper Functions -------------------------
+def load_json(file_path):
+    import json
+    with open(file_path,"r",encoding="utf-8") as f:
+        return json.load(f)
+
+def create_embed(title, description, color=0x3498DB):
+    return discord.Embed(title=title, description=f"```{description}```", color=color)
+    
+# ══════════════════════════════════════════════════════════════════════════════
+# GYI (GUESS YOUR IMPOSTOR) GAME - GTW STYLE
+# ══════════════════════════════════════════════════════════════════════════════
+
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+import asyncio, random, uuid, time
+from typing import List, Dict
+
+gyi_lobbies: Dict[str, dict] = {}  # lobby_code -> lobby_data
+gyi_cooldowns: Dict[int, float] = {}  # user_id -> last create timestamp
+
+class GYIManager:
+    def __init__(self, bot):
+        self.bot = bot
+        self.lobbies = gyi_lobbies
+        self.cooldowns = gyi_cooldowns
+        self.lobby_timeout = 600  # 10 min auto delete
+        self.cleanup_task.start()
+
+    # ----------------- Lobby Creation -----------------
+    def generate_code(self, length=4):
+        return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=length))
+
+    async def create_lobby(self, host: discord.Member, channel: discord.TextChannel):
+        now = time.time()
+        if host.id in self.cooldowns and now - self.cooldowns[host.id] < 60:
+            return None, f"⏳ You must wait before creating another lobby!"
+        code = self.generate_code()
+        self.cooldowns[host.id] = now
+        self.lobbies[code] = {
+            "host": host.id,
+            "channel": channel.id,
+            "players": [host.id],
+            "started": False,
+            "prompts": [],
+            "round": 1,
+            "max_rounds": 3,
+            "answers": {},
+            "impostors": [],
+            "message_id": None,
+            "created_at": now
+        }
+        return code, f"🎮 Lobby created! Code: `{code}`. Host: {host.display_name}"
+
+    async def join_lobby(self, user: discord.Member, code: str):
+        lobby = self.lobbies.get(code)
+        if not lobby:
+            return f"❌ Lobby `{code}` not found."
+        if lobby["started"]:
+            return f"❌ Lobby `{code}` has already started."
+        if user.id in lobby["players"]:
+            return f"❌ You are already in this lobby."
+        lobby["players"].append(user.id)
+        return f"✅ {user.display_name} joined lobby `{code}`!"
+
+    # ----------------- Start Game -----------------
+    async def start_lobby(self, code: str):
+        lobby = self.lobbies.get(code)
+        if not lobby or lobby["started"]:
+            return False
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
+
+        if len(players) < 3:
+            await channel.send("⚠️ Need at least **3 players** to start the game.")
+            return False
+
+        # Multiple impostors logic: all players could be impostors randomly
+        num_players = len(players)
+        impostor_count = 1 if num_players <= 5 else 1 + (num_players - 5) // 4
+        impostors = random.sample(players, impostor_count)
+        lobby["impostors"] = [p.id for p in impostors]
+
+        gyi_words = load_json("gyi_words.json")
+        prompt_pair = random.choice(gyi_words["pairs"])
+        lobby["prompts"] = [prompt_pair]
+
+        for p in players:
+            try:
+                if p.id in lobby["impostors"]:
+                    embed = create_embed("⚠️ YOU ARE THE IMPOSTOR!", f"Your word: {prompt_pair['impostor']}", 0xE74C3C)
+                else:
+                    embed = create_embed("💡 YOUR WORD", f"Your word: {prompt_pair['normal']}", 0x3498DB)
+                await p.send(embed=embed)
+            except:
+                pass
+
+        lobby["started"] = True
+        lobby["round"] = 1
+        await self.run_round(code)
+        return True
+
+    # ----------------- Round Loop -----------------
+    async def run_round(self, code: str):
+        lobby = self.lobbies.get(code)
+        if not lobby: return
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
+        prompt_pair = lobby["prompts"][0]
+
+        for r in range(lobby["round"], lobby["max_rounds"] + 1):
+            lobby["round"] = r
+            embed = create_embed(f"Round {r}", f"Prompt: {prompt_pair['normal']}", 0x8E44AD)
+            msg = await channel.send(embed=embed)
+            lobby["answers"][r] = {}
+
+            banned_words = ["best","worst","bad","good","holiday","nice","great","terrible"]
+
+            def check(m):
+                return m.reference and m.reference.message_id == msg.id and m.author.id in lobby["players"] \
+                       and 1 <= len(m.content.split()) <= 2 and not any(bw in m.content.lower() for bw in banned_words)
+
+            round_end = time.time() + 90
+            while time.time() < round_end:
+                try:
+                    m = await self.bot.wait_for("message", check=check, timeout=10)
+                    lobby["answers"][r][m.author.id] = m.content.strip()
+                except asyncio.TimeoutError:
+                    continue
+
+        await self.continue_or_vote(lobby)
+
+    # ----------------- Continue / Vote -----------------
+    async def continue_or_vote(self, lobby):
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
+
+        view = ContinueOrVoteView(lobby["players"])
+        embed = create_embed("⚡ Continue or Vote?", "Majority decides: Continue game or vote on impostor.", 0xF1C40F)
+        msg = await channel.send(embed=embed, view=view)
+        await view.wait()
+
+        continue_count = list(view.choices.values()).count("continue")
+        vote_count = list(view.choices.values()).count("vote")
+
+        if continue_count >= vote_count:
+            await channel.send("✅ Majority chose **Continue**! Starting next round...")
+            lobby["round"] += 1
+            await self.run_round(lobby_code_from_lobby(lobby))
         else:
-            eliminated_id = candidates[0]
+            await self.voting_phase(lobby)
 
-        if eliminated_id in session["impostors"]:
-            await channel.send(f"🎉 The impostor <@{eliminated_id}> was caught!")
-        else:
-            await channel.send(f"❌ <@{eliminated_id}> was eliminated but was not an impostor!")
+    # ----------------- Voting -----------------
+    async def voting_phase(self, lobby):
+        channel = self.bot.get_channel(lobby["channel"])
+        players = [self.bot.get_user(pid) for pid in lobby["players"]]
 
-# ---------------------- RPS Tie-Breaker ----------------------
-async def gtw_rps(channel, candidates):
-    moves = {"✊": "rock", "✋": "paper", "✌️": "scissors"}
-    player_moves = {}
+        view = GTWVotingView(players)
+        embed = create_embed("🗳️ Voting Phase", "Vote for who you think is the impostor!", 0x1ABC9C)
+        msg = await channel.send(embed=embed, view=view)
+        await view.wait()
 
-    def check(reaction, user):
-        return user.id in candidates and str(reaction.emoji) in moves
+        if view.votes:
+            max_votes = max(view.votes.values())
+            candidates = [pid for pid, count in view.votes.items() if count == max_votes]
 
-    await channel.send(f"Tie between: {', '.join([f'<@{c}>' for c in candidates])}. First to choose wins RPS!")
+            if len(candidates) > 1:
+                await channel.send("Tie detected! Tie players do RPS fight.")
+                loser = await self.rps(channel, candidates)
+            else:
+                loser = candidates[0]
 
-    while len(player_moves) < len(candidates):
-        try:
-            reaction, user = await bot.wait_for("reaction_add", timeout=30.0, check=check)
-            if user.id not in player_moves:
-                player_moves[user.id] = moves[str(reaction.emoji)]
-                await channel.send(f"<@{user.id}> chose {moves[str(reaction.emoji)]}")
-        except asyncio.TimeoutError:
-            break
+            if loser in lobby["impostors"]:
+                await channel.send(f"🎉 The impostor <@{loser}> was caught!")
+            else:
+                await channel.send(f"❌ <@{loser}> was eliminated but was not an impostor!")
 
-    # Determine winner randomly if tie persists
-    if len(player_moves) < len(candidates):
-        loser = random.choice(candidates)
-    else:
+    # ----------------- RPS -----------------
+    async def rps(self, channel, candidates):
+        moves = {"✊":"rock","✋":"paper","✌️":"scissors"}
+        player_moves = {}
+
+        def check(reaction, user):
+            return user.id in candidates and str(reaction.emoji) in moves
+
+        await channel.send(f"Tie between: {', '.join([f'<@{c}>' for c in candidates])}. React with ✊, ✋, ✌️.")
+
+        while len(player_moves) < len(candidates):
+            try:
+                reaction, user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
+                if user.id not in player_moves:
+                    player_moves[user.id] = moves[str(reaction.emoji)]
+                    await channel.send(f"<@{user.id}> chose {moves[str(reaction.emoji)]}")
+            except asyncio.TimeoutError:
+                break
+
+        if len(player_moves) < len(candidates):
+            return random.choice(candidates)
+
         ids = list(player_moves.keys())
         m1, m2 = player_moves[ids[0]], player_moves[ids[1]]
-        # RPS logic
         if m1 == m2:
-            loser = random.choice(ids)
-        elif (m1, m2) in [("rock", "scissors"), ("paper", "rock"), ("scissors", "paper")]:
-            loser = ids[1]
+            return random.choice(ids)
+        elif (m1,m2) in [("rock","scissors"),("paper","rock"),("scissors","paper")]:
+            return ids[1]
         else:
-            loser = ids[0]
-    return loser
+            return ids[0]
 
-# ---------------------- Commands ----------------------
-@bot.tree.command(name="gtw", description="Start a Guess The Word game")
-@app_commands.describe(player1="First player", player2="Second player", player3="Third player")
-async def gtw_slash(interaction: discord.Interaction, player1: discord.Member, player2: discord.Member, player3: discord.Member):
-    async with get_command_lock("gtw"):
-        players = [player1, player2, player3]
-        if interaction.user not in players:
-            players.append(interaction.user)
-        await gtw_handler(interaction, players)
+    # ----------------- Cleanup -----------------
+    @tasks.loop(seconds=60)
+    async def cleanup_task(self):
+        now = time.time()
+        expired = []
+        for code, lobby in self.lobbies.items():
+            if not lobby["started"] and now - lobby["created_at"] > self.lobby_timeout:
+                expired.append(code)
+                channel = self.bot.get_channel(lobby["channel"])
+                host = self.bot.get_user(lobby["host"])
+                if channel:
+                    await channel.send(f"⌛ Lobby `{code}` created by {host.display_name} expired due to inactivity.")
+        for code in expired:
+            del self.lobbies[code]
 
-@bot.command(name="gtw")
-async def gtw_prefix(ctx, *members: discord.Member):
-    async with get_command_lock("gtw"):
-        players = list(members)
-        if ctx.author not in players:
-            players.append(ctx.author)
-        await gtw_handler(ctx, players)
-        
-# ══════════════════════════════════════════════════════════════════════════════
-# GYI (GUESS YOUR IMPOSTOR) GAME
-# ══════════════════════════════════════════════════════════════════════════════
+# ----------------- Slash Commands -----------------
+@bot.tree.command(name="gyi_create", description="Create a GYI lobby")
+async def gyi_create(interaction: discord.Interaction):
+    code, msg = await gyi_manager.create_lobby(interaction.user, interaction.channel)
+    await interaction.response.send_message(msg)
 
-gyi_sessions: Dict[int, dict] = {}
+@bot.tree.command(name="gyi_join", description="Join a GYI lobby")
+@app_commands.describe(code="Lobby code to join")
+async def gyi_join(interaction: discord.Interaction, code: str):
+    msg = await gyi_manager.join_lobby(interaction.user, code.upper())
+    await interaction.response.send_message(msg)
 
-async def gyi_handler(ctx_or_interaction, players: List[discord.Member] = None):
-    """Unified GYI game handler"""
-    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
-    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
-    channel = ctx_or_interaction.channel
-    
-    if not players or len(players) < 3:
-        embed = create_glass_embed(
-            title=f"{Emojis.GLASS} GUESS THE IMPOSTOR",
-            description="You need at least **3 players** to start!\n\nUsage: `gyi @player1 @player2 @player3 ...`",
-            color=Colors.WARNING
-        )
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-        return
-    
-    session_id = str(uuid.uuid4())[:8]
-    impostor = random.choice(players)
-    
-    gyi_words = load_json("gyi_words.json")
-    word_pair = random.choice(gyi_words["pairs"])
-    
-    session = {
-        "id": session_id,
-        "players": [p.id for p in players],
-        "impostor": impostor.id,
-        "normal_word": word_pair["normal"],
-        "impostor_word": word_pair["impostor"],
-        "answers": {},
-        "round": 1,
-        "max_rounds": 3,
-        "message_id": None,
-        "channel_id": channel.id
-    }
-    gyi_sessions[channel.id] = session
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.GLASS} GUESS THE IMPOSTOR",
-        description=f"**Session:** `{session_id}`\n**Players:** {', '.join([p.display_name for p in players])}\n**Rounds:** 3\n\n**Rules:**\n• Reply to this message with a 1-2 word descriptor\n• One player has a DIFFERENT word!\n• Find the impostor based on their descriptions!\n\n**Describe your word!**",
-        color=Colors.NEON_PURPLE
-    )
-    embed.set_footer(text=f"◈ {FOOTER_TEXT} ◈ | Reply with a 1-2 word descriptor!")
-    
-    for player in players:
-        try:
-            if player.id == impostor.id:
-                dm_embed = create_glass_embed(
-                    title=f"{Emojis.GLASS} YOU ARE THE IMPOSTOR!",
-                    description=f"Your word is: **{word_pair['impostor']}**\n\nOthers have: **{word_pair['normal']}**\n\nBlend in with your descriptions!",
-                    color=Colors.ERROR
-                )
-            else:
-                dm_embed = create_glass_embed(
-                    title=f"{Emojis.GLASS} GYI - Your Word",
-                    description=f"Your word is: **{word_pair['normal']}**\n\nDescribe it without saying the word!",
-                    color=Colors.INFO
-                )
-            await player.send(embed=dm_embed)
-        except:
-            pass
-    
-    if is_slash:
-        await ctx_or_interaction.response.send_message(embed=embed)
-        message = await ctx_or_interaction.original_response()
-    else:
-        message = await ctx_or_interaction.send(embed=embed)
-    
-    session["message_id"] = message.id
-    
-    valid_answers = 0
-    
-    def check_answer(m):
-        if m.reference and m.reference.message_id == session["message_id"]:
-            if m.author.id in session["players"]:
-                words = m.content.strip().split()
-                if 1 <= len(words) <= 2:
-                    return True
-        return False
-    
-    timeout_time = 90 * session["max_rounds"]
-    start_time = time.time()
-    
-    while valid_answers < 9 and time.time() - start_time < timeout_time:
-        try:
-            response = await bot.wait_for("message", check=check_answer, timeout=30)
-            player_id = response.author.id
-            
-            if player_id not in session["answers"]:
-                session["answers"][player_id] = []
-            session["answers"][player_id].append(response.content.strip())
-            valid_answers += 1
-            
-        except asyncio.TimeoutError:
-            if valid_answers >= 3:
-                break
-            continue
-    
-    if valid_answers < 3:
-        embed = create_glass_embed(
-            title=f"{Emojis.CROSS} GAME CANCELLED",
-            description="Not enough answers received!",
-            color=Colors.ERROR
-        )
-        await channel.send(embed=embed)
-        del gyi_sessions[channel.id]
-        return
-    
-    view = GTWVotingView(session_id, players, impostor.id)
-    
-    answers_text = "\n".join([f"**{bot.get_user(pid).display_name}:** {', '.join(ans)}" for pid, ans in session["answers"].items()])
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.VOTE} VOTING TIME!",
-        description=f"**Descriptions:**\n{answers_text}\n\n**Vote for who you think is the impostor!**",
-        color=Colors.NEON_CYAN
-    )
-    
-    vote_message = await channel.send(embed=embed, view=view)
-    
-    await view.wait()
-    
-    if view.votes:
-        most_voted = max(view.votes, key=view.votes.get)
-        most_votes = view.votes[most_voted]
-    else:
-        most_voted = None
-        most_votes = 0
-    
-    if most_voted == impostor.id:
-        result = f"{Emojis.TROPHY} **PLAYERS WIN!**\n\nThe impostor was **{impostor.display_name}** and they were caught!"
-        color = Colors.SUCCESS
-        
-        for player in players:
-            if player.id != impostor.id:
-                user_data = get_user_economy(player.id)
-                user_data["wallet"] += 100
-                user_data["total_earned"] += 100
-                update_user_economy(player.id, user_data)
-    else:
-        result = f"{Emojis.FIRE} **IMPOSTOR WINS!**\n\nThe impostor was **{impostor.display_name}** and they escaped!"
-        color = Colors.ERROR
-        
-        user_data = get_user_economy(impostor.id)
-        user_data["wallet"] += 200
-        user_data["total_earned"] += 200
-        update_user_economy(impostor.id, user_data)
-    
-    stats = load_json("games_stats.json")
-    for player in players:
-        pid = str(player.id)
-        if pid not in stats["gyi"]["leaderboard"]:
-            stats["gyi"]["leaderboard"][pid] = {"wins": 0, "losses": 0, "impostor_wins": 0}
-        
-        if player.id == impostor.id:
-            if most_voted != impostor.id:
-                stats["gyi"]["leaderboard"][pid]["impostor_wins"] += 1
-                stats["gyi"]["leaderboard"][pid]["wins"] += 1
-            else:
-                stats["gyi"]["leaderboard"][pid]["losses"] += 1
-        else:
-            if most_voted == impostor.id:
-                stats["gyi"]["leaderboard"][pid]["wins"] += 1
-            else:
-                stats["gyi"]["leaderboard"][pid]["losses"] += 1
-    save_json("games_stats.json", stats)
-    
-    vote_breakdown = "\n".join([f"<@{uid}>: **{count}** votes" for uid, count in view.votes.items()])
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.GLASS} GAME OVER!",
-        description=f"{result}\n\n**Vote Breakdown:**\n{vote_breakdown}\n\n**Normal Word:** {session['normal_word']}\n**Impostor Word:** {session['impostor_word']}",
-        color=color
-    )
-    
-    await channel.send(embed=embed)
-    
-    if channel.id in gyi_sessions:
-        del gyi_sessions[channel.id]
+# ----------------- Prefix Commands -----------------
+prefixes = ["eu","elura"]
+prefix_bot = commands.Bot(command_prefix=prefixes, intents=discord.Intents.all())
 
-@bot.tree.command(name="gyi", description="Start a Guess Your Impostor game")
-@app_commands.describe(player1="First player", player2="Second player", player3="Third player")
-async def gyi_slash(interaction: discord.Interaction, player1: discord.Member, player2: discord.Member, player3: discord.Member):
-    async with get_command_lock("gyi"):
-        players = [player1, player2, player3]
-        if interaction.user not in players:
-            players.append(interaction.user)
-        await gyi_handler(interaction, players)
+@prefix_bot.command(name="gyicreate")
+async def gyi_create_prefix(ctx):
+    code, msg = await gyi_manager.create_lobby(ctx.author, ctx.channel)
+    await ctx.send(msg)
 
-@bot.command(name="gyi", aliases=["imposter", "impostor"])
-async def gyi_prefix(ctx, *members: discord.Member):
-    async with get_command_lock("gyi"):
-        players = list(members)
-        if ctx.author not in players:
-            players.append(ctx.author)
-        await gyi_handler(ctx, players)
+@prefix_bot.command(name="gyijoin")
+async def gyi_join_prefix(ctx, code: str):
+    msg = await gyi_manager.join_lobby(ctx.author, code.upper())
+    await ctx.send(msg)
 
+# ----------------- Helper Functions -----------------
+def load_json(file_path):
+    import json
+    with open(file_path,"r",encoding="utf-8") as f:
+        return json.load(f)
+
+def create_embed(title, description, color=0x3498DB):
+    return discord.Embed(title=title, description=f"```{description}```", color=color)
+    
 # ══════════════════════════════════════════════════════════════════════════════
 # PUNISHMENT SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2701,1162 +2778,6 @@ async def softban_prefix(ctx, target: discord.Member = None, *, reason: str = "N
         await punishment_handler(ctx, "softban", target, reason)
            
 # ══════════════════════════════════════════════════════════════════════════════
-# POLITICAL PARTY SYSTEM
-# ══════════════════════════════════════════════════════════════════════════════
-
-class PartyJoinView(discord.ui.View):
-    def __init__(self, user_id: int):
-        super().__init__(timeout=60)
-        self.user_id = user_id
-        self.selected_party = None
-    
-    @discord.ui.select(
-        placeholder="Select a party to join...",
-        options=[
-            discord.SelectOption(label="Communist Party", value="communist", emoji="🔴"),
-            discord.SelectOption(label="Republic Party", value="republic", emoji="🔵"),
-            discord.SelectOption(label="Democratic Party", value="democratic", emoji="🟢")
-        ]
-    )
-    async def party_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This menu isn't for you!", ephemeral=True)
-            return
-        
-        self.selected_party = select.values[0]
-        self.stop()
-        
-        roles_data = load_json("roles.json")
-        party_role_id = int(roles_data["party_roles"][self.selected_party])
-        
-        for party in ["communist", "republic", "democratic"]:
-            party_data = load_json(f"{party}.json")
-            if interaction.user.id in party_data["members"]:
-                party_data["members"].remove(interaction.user.id)
-                save_json(f"{party}.json", party_data)
-                
-                old_role_id = int(roles_data["party_roles"][party])
-                old_role = interaction.guild.get_role(old_role_id)
-                if old_role and old_role in interaction.user.roles:
-                    try:
-                        await interaction.user.remove_roles(old_role)
-                    except:
-                        pass
-        
-        party_data = load_json(f"{self.selected_party}.json")
-        if interaction.user.id not in party_data["members"]:
-            party_data["members"].append(interaction.user.id)
-            save_json(f"{self.selected_party}.json", party_data)
-        
-        role = interaction.guild.get_role(party_role_id)
-        if role:
-            try:
-                await interaction.user.add_roles(role)
-            except:
-                pass
-        
-        party_names = {"communist": "Communist", "republic": "Republic", "democratic": "Democratic"}
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.PARTY} PARTY JOINED!",
-            description=f"Welcome to the **{party_names[self.selected_party]} Party**!",
-            color=Colors.SUCCESS
-        )
-        
-        await interaction.response.edit_message(embed=embed, view=None)
-
-async def party_handler(ctx_or_interaction, action: str, target: discord.Member = None):
-    """Unified party handler"""
-    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
-    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
-    guild = ctx_or_interaction.guild
-    
-    roles_data = load_json("roles.json")
-    
-    if action == "join":
-        embed = create_hologram_embed(
-            title=f"{Emojis.PARTY} JOIN A PARTY",
-            description="Select your political party from the dropdown below.\n\n**Available Parties:**\n🔴 Communist Party\n🔵 Republic Party\n🟢 Democratic Party",
-            color=Colors.NEON_PURPLE
-        )
-        
-        view = PartyJoinView(user.id)
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed, view=view)
-        else:
-            await ctx_or_interaction.send(embed=embed, view=view)
-    
-    elif action == "leave":
-        left_party = None
-        for party in ["communist", "republic", "democratic"]:
-            party_data = load_json(f"{party}.json")
-            if user.id in party_data["members"]:
-                party_data["members"].remove(user.id)
-                save_json(f"{party}.json", party_data)
-                left_party = party
-                
-                role_id = int(roles_data["party_roles"][party])
-                role = guild.get_role(role_id)
-                if role and role in user.roles:
-                    try:
-                        await user.remove_roles(role)
-                    except:
-                        pass
-                break
-        
-        if left_party:
-            party_names = {"communist": "Communist", "republic": "Republic", "democratic": "Democratic"}
-            embed = create_glass_embed(
-                title=f"{Emojis.CHECK} LEFT PARTY",
-                description=f"You have left the **{party_names[left_party]} Party**.",
-                color=Colors.SUCCESS
-            )
-        else:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} NOT IN A PARTY",
-                description="You are not a member of any party!",
-                color=Colors.ERROR
-            )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "info":
-        party_stats = []
-        for party in ["communist", "republic", "democratic"]:
-            party_data = load_json(f"{party}.json")
-            member_count = len(party_data["members"])
-            execs = party_data["executives"]
-            
-            party_names = {"communist": "Communist", "republic": "Republic", "democratic": "Democratic"}
-            party_emojis = {"communist": "🔴", "republic": "🔵", "democratic": "🟢"}
-            
-            exec_text = []
-            if execs["president"]:
-                exec_text.append(f"President: <@{execs['president']}>")
-            if execs["vice_president"]:
-                exec_text.append(f"VP: <@{execs['vice_president']}>")
-            if execs["general_secretary"]:
-                exec_text.append(f"GS: <@{execs['general_secretary']}>")
-            
-            bar = progress_bar(member_count, 100, 15)
-            
-            party_stats.append(f"{party_emojis[party]} **{party_names[party]} Party**\n{bar}\nMembers: **{member_count}**\n{chr(10).join(exec_text) if exec_text else 'No executives set'}")
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.PARLIAMENT} PARTY INFORMATION",
-            description="\n\n".join(party_stats),
-            color=Colors.NEON_PURPLE
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "expel":
-        if target is None:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} ERROR",
-                description="Please specify a user to expel!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        user_role_ids = [str(r.id) for r in user.roles]
-        is_leader = any(lid in user_role_ids for lid in roles_data["party_leaders"])
-        
-        if not is_leader:
-            embed = create_glass_embed(
-                title=f"{Emojis.SHIELD} UNAUTHORIZED",
-                description="Only party leaders can expel members!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        expelled_from = None
-        for party in ["communist", "republic", "democratic"]:
-            party_data = load_json(f"{party}.json")
-            if target.id in party_data["members"]:
-                party_data["members"].remove(target.id)
-                save_json(f"{party}.json", party_data)
-                expelled_from = party
-                
-                role_id = int(roles_data["party_roles"][party])
-                role = guild.get_role(role_id)
-                if role and role in target.roles:
-                    try:
-                        await target.remove_roles(role)
-                    except:
-                        pass
-                break
-        
-        if expelled_from:
-            party_names = {"communist": "Communist", "republic": "Republic", "democratic": "Democratic"}
-            embed = create_neon_embed(
-                title=f"{Emojis.GAVEL} MEMBER EXPELLED",
-                description=f"{target.mention} has been expelled from the **{party_names[expelled_from]} Party**.",
-                color=Colors.ERROR
-            )
-        else:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} NOT IN A PARTY",
-                description=f"{target.mention} is not a member of any party!",
-                color=Colors.ERROR
-            )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-
-# Party Command Group
-party_group = app_commands.Group(name="party", description="Political party commands")
-
-@party_group.command(name="join", description="Join a political party")
-async def party_join_slash(interaction: discord.Interaction):
-    async with get_command_lock("party_join"):
-        await party_handler(interaction, "join")
-
-@party_group.command(name="leave", description="Leave your current party")
-async def party_leave_slash(interaction: discord.Interaction):
-    async with get_command_lock("party_leave"):
-        await party_handler(interaction, "leave")
-
-@party_group.command(name="info", description="View party information")
-async def party_info_slash(interaction: discord.Interaction):
-    async with get_command_lock("party_info"):
-        await party_handler(interaction, "info")
-
-@party_group.command(name="expel", description="Expel a member from a party (Leaders only)")
-@app_commands.describe(target="User to expel")
-async def party_expel_slash(interaction: discord.Interaction, target: discord.Member):
-    async with get_command_lock("party_expel"):
-        await party_handler(interaction, "expel", target)
-
-bot.tree.add_command(party_group)
-
-# Party Prefix Commands
-@bot.group(name="party", invoke_without_command=True)
-async def party_prefix(ctx):
-    async with get_command_lock("party_info"):
-        await party_handler(ctx, "info")
-
-@party_prefix.command(name="join")
-async def party_join_prefix(ctx):
-    async with get_command_lock("party_join"):
-        await party_handler(ctx, "join")
-
-@party_prefix.command(name="leave")
-async def party_leave_prefix(ctx):
-    async with get_command_lock("party_leave"):
-        await party_handler(ctx, "leave")
-
-@party_prefix.command(name="info")
-async def party_info_prefix(ctx):
-    async with get_command_lock("party_info"):
-        await party_handler(ctx, "info")
-
-@party_prefix.command(name="expel")
-async def party_expel_prefix(ctx, target: discord.Member = None):
-    async with get_command_lock("party_expel"):
-        await party_handler(ctx, "expel", target)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ELECTION SYSTEM
-# ══════════════════════════════════════════════════════════════════════════════
-
-class ElectionVoteView(discord.ui.View):
-    def __init__(self, candidates: List[dict]):
-        super().__init__(timeout=None)
-        self.candidates = candidates
-        self.vote_lock = asyncio.Lock()
-        self.session_id = str(uuid.uuid4())[:8]
-        
-        options = []
-        for candidate in candidates:
-            options.append(discord.SelectOption(
-                label=candidate["name"][:25],
-                value=str(candidate["id"]),
-                description=f"Party: {candidate['party']}"
-            ))
-        
-        select = discord.ui.Select(
-            placeholder="Cast your vote...",
-            options=options,
-            custom_id=f"election_vote_select_{self.session_id}"
-        )
-        select.callback = self.vote_callback
-        self.add_item(select)
-    
-    async def vote_callback(self, interaction: discord.Interaction):
-        error_msg = None
-        success = False
-        
-        async with self.vote_lock:
-            election = load_json("election.json")
-            
-            if not election["active"]:
-                error_msg = "This election has ended!"
-            elif interaction.user.id in election["voters"]:
-                error_msg = "You have already voted in this election!"
-            else:
-                roles_data = load_json("roles.json")
-                user_role_ids = [str(r.id) for r in interaction.user.roles]
-                is_restricted = any(rid in user_role_ids for rid in roles_data["restricted_voters"])
-                
-                if is_restricted:
-                    error_msg = "You are not eligible to vote!"
-                else:
-                    candidate_id = interaction.data["values"][0]
-                    
-                    if candidate_id not in election["votes"]:
-                        election["votes"][candidate_id] = 0
-                    election["votes"][candidate_id] += 1
-                    election["voters"].append(interaction.user.id)
-                    
-                    save_json("election.json", election)
-                    success = True
-        
-        if error_msg:
-            await interaction.response.send_message(error_msg, ephemeral=True)
-        elif success:
-            await interaction.response.send_message(
-                f"{Emojis.CHECK} Your vote has been recorded!",
-                ephemeral=True
-            )
-
-async def election_handler(ctx_or_interaction, action: str):
-    """Unified election handler"""
-    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
-    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
-    guild = ctx_or_interaction.guild
-    
-    election = load_json("election.json")
-    roles_data = load_json("roles.json")
-    
-    if action == "start":
-        user_tier = get_user_punishment_tier(user)
-        if user_tier < 3:
-            embed = create_glass_embed(
-                title=f"{Emojis.SHIELD} UNAUTHORIZED",
-                description="You need Tier 3+ permissions to start elections!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        if election["active"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} ELECTION ACTIVE",
-                description="An election is already in progress!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        candidates = []
-        for party in ["communist", "republic", "democratic"]:
-            party_data = load_json(f"{party}.json")
-            if party_data["executives"]["president"]:
-                member = guild.get_member(party_data["executives"]["president"])
-                if member:
-                    candidates.append({
-                        "id": member.id,
-                        "name": member.display_name,
-                        "party": party.capitalize()
-                    })
-        
-        if len(candidates) < 2:
-            for party in ["communist", "republic", "democratic"]:
-                party_data = load_json(f"{party}.json")
-                if party_data["members"]:
-                    member = guild.get_member(party_data["members"][0])
-                    if member and member.id not in [c["id"] for c in candidates]:
-                        candidates.append({
-                            "id": member.id,
-                            "name": member.display_name,
-                            "party": party.capitalize()
-                        })
-        
-        election = {
-            "active": True,
-            "candidates": {str(c["id"]): c for c in candidates},
-            "votes": {},
-            "voters": [],
-            "start_time": datetime.utcnow().isoformat(),
-            "end_time": None
-        }
-        save_json("election.json", election)
-        
-        view = ElectionVoteView(candidates)
-        
-        candidates_text = "\n".join([f"• **{c['name']}** ({c['party']})" for c in candidates])
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.VOTE} ELECTION STARTED!",
-            description=f"**Candidates:**\n{candidates_text}\n\n**Cast your vote using the dropdown below!**",
-            color=Colors.NEON_CYAN
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed, view=view)
-        else:
-            await ctx_or_interaction.send(embed=embed, view=view)
-    
-    elif action == "live":
-        if not election["active"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} NO ACTIVE ELECTION",
-                description="There is no active election!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        total_votes = sum(election["votes"].values()) if election["votes"] else 0
-        
-        results = []
-        for cid, candidate in election["candidates"].items():
-            votes = election["votes"].get(cid, 0)
-            percentage = (votes / total_votes * 100) if total_votes > 0 else 0
-            bar = progress_bar(votes, max(total_votes, 1), 15)
-            results.append(f"**{candidate['name']}** ({candidate['party']})\n{bar}\n{votes} votes ({percentage:.1f}%)")
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.VOTE} LIVE ELECTION RESULTS",
-            description="\n\n".join(results) + f"\n\n**Total Votes:** {total_votes}",
-            color=Colors.NEON_CYAN
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "stop":
-        user_tier = get_user_punishment_tier(user)
-        if user_tier < 3:
-            embed = create_glass_embed(
-                title=f"{Emojis.SHIELD} UNAUTHORIZED",
-                description="You need Tier 3+ permissions to stop elections!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        if not election["active"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} NO ACTIVE ELECTION",
-                description="There is no active election to stop!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        election["active"] = False
-        election["end_time"] = datetime.utcnow().isoformat()
-        save_json("election.json", election)
-        
-        total_votes = sum(election["votes"].values()) if election["votes"] else 0
-        
-        if election["votes"]:
-            winner_id = max(election["votes"], key=election["votes"].get)
-            winner = election["candidates"].get(winner_id, {})
-            winner_votes = election["votes"][winner_id]
-        else:
-            winner = {"name": "No one", "party": "N/A"}
-            winner_votes = 0
-        
-        results = []
-        for cid, candidate in election["candidates"].items():
-            votes = election["votes"].get(cid, 0)
-            percentage = (votes / total_votes * 100) if total_votes > 0 else 0
-            bar = progress_bar(votes, max(total_votes, 1), 15)
-            results.append(f"**{candidate['name']}** ({candidate['party']})\n{bar}\n{votes} votes ({percentage:.1f}%)")
-        
-        all_members = set()
-        for member in guild.members:
-            if not member.bot:
-                user_role_ids = [str(r.id) for r in member.roles]
-                if not any(rid in user_role_ids for rid in roles_data["restricted_voters"]):
-                    all_members.add(member.id)
-        
-        non_voters = all_members - set(election["voters"])
-        shame_mentions = " ".join([f"<@{uid}>" for uid in list(non_voters)[:10]])
-        if len(non_voters) > 10:
-            shame_mentions += f" and {len(non_voters) - 10} more..."
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.CROWN} ELECTION CONCLUDED!",
-            description=f"**{Emojis.TROPHY} WINNER: {winner['name']}** ({winner.get('party', 'N/A')})\n\n**Final Results:**\n" + "\n\n".join(results) + f"\n\n**Total Votes:** {total_votes}",
-            color=Colors.GOLD
-        )
-        
-        if non_voters:
-            embed.add_field(
-                name=f"{Emojis.WARN} Mention of Shame",
-                value=f"These eligible voters didn't participate:\n{shame_mentions}",
-                inline=False
-            )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "reset":
-        user_tier = get_user_punishment_tier(user)
-        if user_tier < 4:
-            embed = create_glass_embed(
-                title=f"{Emojis.SHIELD} UNAUTHORIZED",
-                description="You need Tier 4+ permissions to reset elections!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        election = {
-            "active": False,
-            "candidates": {},
-            "votes": {},
-            "voters": [],
-            "start_time": None,
-            "end_time": None
-        }
-        save_json("election.json", election)
-        
-        embed = create_glass_embed(
-            title=f"{Emojis.CHECK} ELECTION RESET",
-            description="Election data has been completely reset!",
-            color=Colors.SUCCESS
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "summary":
-        if election["active"]:
-            status = "🟢 **ACTIVE**"
-        elif election["end_time"]:
-            status = "🔴 **CONCLUDED**"
-        else:
-            status = "⚪ **NOT STARTED**"
-        
-        total_votes = sum(election["votes"].values()) if election["votes"] else 0
-        voters_count = len(election["voters"])
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.VOTE} ELECTION SUMMARY",
-            description=f"**Status:** {status}\n**Total Votes:** {total_votes}\n**Unique Voters:** {voters_count}",
-            color=Colors.INFO
-        )
-        
-        if election["candidates"]:
-            candidates_text = "\n".join([f"• {c['name']} ({c['party']})" for c in election["candidates"].values()])
-            embed.add_field(name="Candidates", value=candidates_text, inline=False)
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-
-# Election Command Group
-election_group = app_commands.Group(name="election", description="Election commands")
-
-@election_group.command(name="start", description="Start a new election")
-async def election_start_slash(interaction: discord.Interaction):
-    async with get_command_lock("election_start"):
-        await election_handler(interaction, "start")
-
-@election_group.command(name="live", description="View live election results")
-async def election_live_slash(interaction: discord.Interaction):
-    async with get_command_lock("election_live"):
-        await election_handler(interaction, "live")
-
-@election_group.command(name="stop", description="Stop the current election")
-async def election_stop_slash(interaction: discord.Interaction):
-    async with get_command_lock("election_stop"):
-        await election_handler(interaction, "stop")
-
-@election_group.command(name="reset", description="Reset all election data")
-async def election_reset_slash(interaction: discord.Interaction):
-    async with get_command_lock("election_reset"):
-        await election_handler(interaction, "reset")
-
-@election_group.command(name="summary", description="View election summary")
-async def election_summary_slash(interaction: discord.Interaction):
-    async with get_command_lock("election_summary"):
-        await election_handler(interaction, "summary")
-
-bot.tree.add_command(election_group)
-
-# Election Prefix Commands
-@bot.group(name="election", aliases=["elections"], invoke_without_command=True)
-async def election_prefix(ctx):
-    async with get_command_lock("election_summary"):
-        await election_handler(ctx, "summary")
-
-@election_prefix.command(name="start")
-async def election_start_prefix(ctx):
-    async with get_command_lock("election_start"):
-        await election_handler(ctx, "start")
-
-@election_prefix.command(name="live")
-async def election_live_prefix(ctx):
-    async with get_command_lock("election_live"):
-        await election_handler(ctx, "live")
-
-@election_prefix.command(name="stop")
-async def election_stop_prefix(ctx):
-    async with get_command_lock("election_stop"):
-        await election_handler(ctx, "stop")
-
-@election_prefix.command(name="reset")
-async def election_reset_prefix(ctx):
-    async with get_command_lock("election_reset"):
-        await election_handler(ctx, "reset")
-
-@election_prefix.command(name="summary")
-async def election_summary_prefix(ctx):
-    async with get_command_lock("election_summary"):
-        await election_handler(ctx, "summary")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# BILL SYSTEM
-# ══════════════════════════════════════════════════════════════════════════════
-
-class BillVoteView(discord.ui.View):
-    def __init__(self, bill_id: int):
-        super().__init__(timeout=None)
-        self.bill_id = bill_id
-        self.vote_lock = asyncio.Lock()
-        self.session_id = str(uuid.uuid4())[:8]
-    
-    @discord.ui.button(label="Aye", style=discord.ButtonStyle.success, emoji="✅")
-    async def vote_aye(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_vote(interaction, "aye")
-    
-    @discord.ui.button(label="Nay", style=discord.ButtonStyle.danger, emoji="❌")
-    async def vote_nay(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_vote(interaction, "nay")
-    
-    @discord.ui.button(label="Abstain", style=discord.ButtonStyle.secondary, emoji="⬜")
-    async def vote_abstain(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_vote(interaction, "abstain")
-    
-    async def process_vote(self, interaction: discord.Interaction, vote_type: str):
-        error_msg = None
-        success = False
-        
-        async with self.vote_lock:
-            bills = load_json("bills.json")
-            
-            bill = None
-            for b in bills["bills"]:
-                if b["id"] == self.bill_id:
-                    bill = b
-                    break
-            
-            if not bill:
-                error_msg = "Bill not found!"
-            elif bill["status"] != "voting":
-                error_msg = "Voting on this bill has ended!"
-            elif interaction.user.id in bill["voters"]:
-                error_msg = "You have already voted on this bill!"
-            else:
-                bill["votes"][vote_type] += 1
-                bill["voters"].append(interaction.user.id)
-                save_json("bills.json", bills)
-                success = True
-        
-        if error_msg:
-            await interaction.response.send_message(error_msg, ephemeral=True)
-        elif success:
-            await interaction.response.send_message(
-                f"{Emojis.CHECK} You voted **{vote_type.upper()}** on Bill #{self.bill_id}!",
-                ephemeral=True
-            )
-
-async def bill_handler(ctx_or_interaction, action: str, title: str = None, content: str = None, bill_id: int = None):
-    """Unified bill handler"""
-    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
-    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
-    
-    bills = load_json("bills.json")
-    
-    if action == "propose":
-        if not title or not content:
-            embed = create_glass_embed(
-                title=f"{Emojis.SCROLL} PROPOSE A BILL",
-                description="Usage: `bill propose <title> | <content>`",
-                color=Colors.INFO
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        bills["bill_counter"] += 1
-        new_bill = {
-            "id": bills["bill_counter"],
-            "title": title,
-            "content": content,
-            "author_id": user.id,
-            "status": "proposed",
-            "votes": {"aye": 0, "nay": 0, "abstain": 0},
-            "voters": [],
-            "created_at": datetime.utcnow().isoformat()
-        }
-        bills["bills"].append(new_bill)
-        save_json("bills.json", bills)
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.SCROLL} BILL PROPOSED",
-            description=f"**Bill #{new_bill['id']}: {title}**\n\n{content}\n\n*Use `/bill vote {new_bill['id']}` to open voting.*",
-            color=Colors.SUCCESS
-        )
-        embed.set_footer(text=f"Proposed by {user.display_name} • {FOOTER_TEXT}")
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "vote":
-        if bill_id is None:
-            embed = create_glass_embed(
-                title=f"{Emojis.SCROLL} BILL VOTING",
-                description="Usage: `bill vote <bill_id>`",
-                color=Colors.INFO
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        bill = None
-        for b in bills["bills"]:
-            if b["id"] == bill_id:
-                bill = b
-                break
-        
-        if not bill:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} BILL NOT FOUND",
-                description=f"Bill #{bill_id} does not exist!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        bill["status"] = "voting"
-        save_json("bills.json", bills)
-        
-        view = BillVoteView(bill_id)
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.VOTE} BILL #{bill_id} - VOTING OPEN",
-            description=f"**{bill['title']}**\n\n{bill['content']}\n\n**Cast your vote below!**",
-            color=Colors.NEON_CYAN
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed, view=view)
-        else:
-            await ctx_or_interaction.send(embed=embed, view=view)
-    
-    elif action == "result":
-        if bill_id is None:
-            embed = create_glass_embed(
-                title=f"{Emojis.SCROLL} BILL RESULT",
-                description="Usage: `bill result <bill_id>`",
-                color=Colors.INFO
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        bill = None
-        for b in bills["bills"]:
-            if b["id"] == bill_id:
-                bill = b
-                break
-        
-        if not bill:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} BILL NOT FOUND",
-                description=f"Bill #{bill_id} does not exist!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        total_votes = bill["votes"]["aye"] + bill["votes"]["nay"]
-        passed = bill["votes"]["aye"] > bill["votes"]["nay"] if total_votes > 0 else False
-        
-        bill["status"] = "passed" if passed else "rejected"
-        save_json("bills.json", bills)
-        
-        status_emoji = Emojis.CHECK if passed else Emojis.CROSS
-        status_text = "PASSED" if passed else "REJECTED"
-        color = Colors.SUCCESS if passed else Colors.ERROR
-        
-        embed = create_hologram_embed(
-            title=f"{status_emoji} BILL #{bill_id} - {status_text}",
-            description=f"**{bill['title']}**\n\n**Results:**\n✅ Aye: **{bill['votes']['aye']}**\n❌ Nay: **{bill['votes']['nay']}**\n⬜ Abstain: **{bill['votes']['abstain']}**",
-            color=color
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "list":
-        if not bills["bills"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.SCROLL} NO BILLS",
-                description="No bills have been proposed yet!",
-                color=Colors.INFO
-            )
-        else:
-            bills_text = []
-            for bill in bills["bills"][-10:]:
-                status_emoji = {"proposed": "📝", "voting": "🗳️", "passed": "✅", "rejected": "❌"}.get(bill["status"], "❓")
-                bills_text.append(f"{status_emoji} **#{bill['id']}** - {bill['title'][:30]}")
-            
-            embed = create_hologram_embed(
-                title=f"{Emojis.SCROLL} RECENT BILLS",
-                description="\n".join(bills_text),
-                color=Colors.INFO
-            )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-
-# Bill Command Group
-bill_group = app_commands.Group(name="bill", description="Bill commands")
-
-@bill_group.command(name="propose", description="Propose a new bill")
-@app_commands.describe(title="Bill title", content="Bill content")
-async def bill_propose_slash(interaction: discord.Interaction, title: str, content: str):
-    async with get_command_lock("bill_propose"):
-        await bill_handler(interaction, "propose", title, content)
-
-@bill_group.command(name="vote", description="Open voting on a bill")
-@app_commands.describe(bill_id="Bill ID to vote on")
-async def bill_vote_slash(interaction: discord.Interaction, bill_id: int):
-    async with get_command_lock("bill_vote"):
-        await bill_handler(interaction, "vote", bill_id=bill_id)
-
-@bill_group.command(name="result", description="Show bill voting results")
-@app_commands.describe(bill_id="Bill ID")
-async def bill_result_slash(interaction: discord.Interaction, bill_id: int):
-    async with get_command_lock("bill_result"):
-        await bill_handler(interaction, "result", bill_id=bill_id)
-
-@bill_group.command(name="list", description="List recent bills")
-async def bill_list_slash(interaction: discord.Interaction):
-    async with get_command_lock("bill_list"):
-        await bill_handler(interaction, "list")
-
-bot.tree.add_command(bill_group)
-
-# Bill Prefix Commands
-@bot.group(name="bill", invoke_without_command=True)
-async def bill_prefix(ctx):
-    async with get_command_lock("bill_list"):
-        await bill_handler(ctx, "list")
-
-@bill_prefix.command(name="propose")
-async def bill_propose_prefix(ctx, *, args: str = None):
-    if args and "|" in args:
-        parts = args.split("|", 1)
-        title = parts[0].strip()
-        content = parts[1].strip()
-    else:
-        title = None
-        content = None
-    async with get_command_lock("bill_propose"):
-        await bill_handler(ctx, "propose", title, content)
-
-@bill_prefix.command(name="vote")
-async def bill_vote_prefix(ctx, bill_id: int = None):
-    async with get_command_lock("bill_vote"):
-        await bill_handler(ctx, "vote", bill_id=bill_id)
-
-@bill_prefix.command(name="result")
-async def bill_result_prefix(ctx, bill_id: int = None):
-    async with get_command_lock("bill_result"):
-        await bill_handler(ctx, "result", bill_id=bill_id)
-
-@bill_prefix.command(name="list")
-async def bill_list_prefix(ctx):
-    async with get_command_lock("bill_list"):
-        await bill_handler(ctx, "list")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PARLIAMENT SYSTEM
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def parliament_handler(ctx_or_interaction, action: str, topic: str = None, motion: str = None):
-    """Unified parliament handler"""
-    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
-    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
-    
-    parliament = load_json("parliament.json")
-    
-    if action == "start":
-        user_tier = get_user_punishment_tier(user)
-        if user_tier < 3:
-            embed = create_glass_embed(
-                title=f"{Emojis.SHIELD} UNAUTHORIZED",
-                description="You need Tier 3+ permissions to start parliament sessions!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        if parliament["active_session"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} SESSION ACTIVE",
-                description="A parliament session is already in progress!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        parliament["active_session"] = True
-        parliament["session_id"] = str(uuid.uuid4())[:8]
-        parliament["topic"] = topic or "Open Discussion"
-        parliament["transcript"] = []
-        parliament["motions"] = []
-        parliament["start_time"] = datetime.utcnow().isoformat()
-        save_json("parliament.json", parliament)
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.PARLIAMENT} PARLIAMENT SESSION STARTED",
-            description=f"**Session ID:** `{parliament['session_id']}`\n**Topic:** {parliament['topic']}\n\n*All messages will be recorded in the transcript.*",
-            color=Colors.NEON_PURPLE
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "end":
-        user_tier = get_user_punishment_tier(user)
-        if user_tier < 3:
-            embed = create_glass_embed(
-                title=f"{Emojis.SHIELD} UNAUTHORIZED",
-                description="You need Tier 3+ permissions to end parliament sessions!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        if not parliament["active_session"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} NO ACTIVE SESSION",
-                description="There is no active parliament session!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        session_id = parliament["session_id"]
-        topic = parliament["topic"]
-        transcript_count = len(parliament["transcript"])
-        motions_count = len(parliament["motions"])
-        
-        parliament["active_session"] = False
-        save_json("parliament.json", parliament)
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.PARLIAMENT} PARLIAMENT SESSION ENDED",
-            description=f"**Session ID:** `{session_id}`\n**Topic:** {topic}\n\n**Statistics:**\n• Messages: {transcript_count}\n• Motions: {motions_count}",
-            color=Colors.SUCCESS
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "motion":
-        if not parliament["active_session"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.CROSS} NO ACTIVE SESSION",
-                description="There is no active parliament session!",
-                color=Colors.ERROR
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        if not motion:
-            embed = create_glass_embed(
-                title=f"{Emojis.SCROLL} MOTION",
-                description="Usage: `parliament motion <motion text>`",
-                color=Colors.INFO
-            )
-            if is_slash:
-                await ctx_or_interaction.response.send_message(embed=embed)
-            else:
-                await ctx_or_interaction.send(embed=embed)
-            return
-        
-        parliament["motions"].append({
-            "author_id": user.id,
-            "author_name": user.display_name,
-            "motion": motion,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-        save_json("parliament.json", parliament)
-        
-        embed = create_neon_embed(
-            title=f"{Emojis.SCROLL} MOTION SUBMITTED",
-            description=f"**By:** {user.mention}\n\n**Motion:**\n{motion}",
-            color=Colors.INFO
-        )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "status":
-        if not parliament["active_session"]:
-            embed = create_glass_embed(
-                title=f"{Emojis.PARLIAMENT} NO ACTIVE SESSION",
-                description="Parliament is not in session.",
-                color=Colors.INFO
-            )
-        else:
-            embed = create_hologram_embed(
-                title=f"{Emojis.PARLIAMENT} PARLIAMENT STATUS",
-                description=f"**Session ID:** `{parliament['session_id']}`\n**Topic:** {parliament['topic']}\n**Messages:** {len(parliament['transcript'])}\n**Motions:** {len(parliament['motions'])}",
-                color=Colors.NEON_PURPLE
-            )
-        
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-
-# Parliament Command Group
-parliament_group = app_commands.Group(name="parliament", description="Parliament session commands")
-
-@parliament_group.command(name="start", description="Start a parliament session")
-@app_commands.describe(topic="Session topic")
-async def parliament_start_slash(interaction: discord.Interaction, topic: str = None):
-    async with get_command_lock("parliament_start"):
-        await parliament_handler(interaction, "start", topic)
-
-@parliament_group.command(name="end", description="End the current parliament session")
-async def parliament_end_slash(interaction: discord.Interaction):
-    async with get_command_lock("parliament_end"):
-        await parliament_handler(interaction, "end")
-
-@parliament_group.command(name="motion", description="Submit a motion")
-@app_commands.describe(motion="Motion text")
-async def parliament_motion_slash(interaction: discord.Interaction, motion: str):
-    async with get_command_lock("parliament_motion"):
-        await parliament_handler(interaction, "motion", motion=motion)
-
-@parliament_group.command(name="status", description="View parliament status")
-async def parliament_status_slash(interaction: discord.Interaction):
-    async with get_command_lock("parliament_status"):
-        await parliament_handler(interaction, "status")
-
-bot.tree.add_command(parliament_group)
-
-# Parliament Prefix Commands
-@bot.group(name="parliament", invoke_without_command=True)
-async def parliament_prefix(ctx):
-    async with get_command_lock("parliament_status"):
-        await parliament_handler(ctx, "status")
-
-@parliament_prefix.command(name="start")
-async def parliament_start_prefix(ctx, *, topic: str = None):
-    async with get_command_lock("parliament_start"):
-        await parliament_handler(ctx, "start", topic)
-
-@parliament_prefix.command(name="end")
-async def parliament_end_prefix(ctx):
-    async with get_command_lock("parliament_end"):
-        await parliament_handler(ctx, "end")
-
-@parliament_prefix.command(name="motion")
-async def parliament_motion_prefix(ctx, *, motion: str = None):
-    async with get_command_lock("parliament_motion"):
-        await parliament_handler(ctx, "motion", motion=motion)
-
-@parliament_prefix.command(name="status")
-async def parliament_status_prefix(ctx):
-    async with get_command_lock("parliament_status"):
-        await parliament_handler(ctx, "status")
-
-# ══════════════════════════════════════════════════════════════════════════════
 # TRANSLATE SYSTEM
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -4149,10 +3070,6 @@ class HelpView(discord.ui.View):
             discord.SelectOption(label="Casino", value="casino", emoji="🎰", description="Gambling games"),
             discord.SelectOption(label="Fun", value="fun", emoji="🎮", description="Fun games & activities"),
             discord.SelectOption(label="Moderation", value="moderation", emoji="🛡️", description="Server moderation"),
-            discord.SelectOption(label="Elections", value="elections", emoji="🗳️", description="Voting system"),
-            discord.SelectOption(label="Parties", value="parties", emoji="🎉", description="Political parties"),
-            discord.SelectOption(label="Parliament", value="parliament", emoji="🏛️", description="Parliament sessions"),
-            discord.SelectOption(label="Bills", value="bills", emoji="📜", description="Bill system"),
             discord.SelectOption(label="Utility", value="utility", emoji="⚙️", description="Utility commands"),
             discord.SelectOption(label="Support", value="support", emoji="💬", description="Get help")
         ]
@@ -4207,43 +3124,6 @@ class HelpView(discord.ui.View):
                     ("`kick <user> [reason]`", "Kick a user"),
                     ("`ban <user> [reason]`", "Ban a user"),
                     ("`softban <user> [reason]`", "Softban a user")
-                ]
-            },
-            "elections": {
-                "title": f"{Emojis.VOTE} ELECTION COMMANDS",
-                "commands": [
-                    ("`election start`", "Start an election"),
-                    ("`election live`", "View live results"),
-                    ("`election stop`", "End election & show results"),
-                    ("`election reset`", "Reset all election data"),
-                    ("`election summary`", "View election summary")
-                ]
-            },
-            "parties": {
-                "title": f"{Emojis.PARTY} PARTY COMMANDS",
-                "commands": [
-                    ("`party join`", "Join a political party"),
-                    ("`party leave`", "Leave your party"),
-                    ("`party info`", "View party information"),
-                    ("`party expel <user>`", "Expel a party member")
-                ]
-            },
-            "parliament": {
-                "title": f"{Emojis.PARLIAMENT} PARLIAMENT COMMANDS",
-                "commands": [
-                    ("`parliament start [topic]`", "Start a session"),
-                    ("`parliament end`", "End the session"),
-                    ("`parliament motion <text>`", "Submit a motion"),
-                    ("`parliament status`", "View session status")
-                ]
-            },
-            "bills": {
-                "title": f"{Emojis.SCROLL} BILL COMMANDS",
-                "commands": [
-                    ("`bill propose <title> | <content>`", "Propose a bill"),
-                    ("`bill vote <id>`", "Open voting on a bill"),
-                    ("`bill result <id>`", "View bill results"),
-                    ("`bill list`", "List recent bills")
                 ]
             },
             "utility": {
@@ -4304,129 +3184,193 @@ async def help_prefix(ctx):
         await help_handler(ctx)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SETUP WIZARD
+# PROFESSIONAL FINAL SETUP WIZARD
 # ══════════════════════════════════════════════════════════════════════════════
 
-class SetupView(discord.ui.View):
-    def __init__(self, user_id: int):
+import discord
+from discord.ext import commands
+from discord import app_commands
+import asyncio
+import json
+
+# ---------------------- Helper Functions ----------------------
+def load_json(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(file_path, data):
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+def create_embed(title, description, color=0x9B59B6):
+    return discord.Embed(title=title, description=description, color=color)
+
+def progress_bar(current, total, length=20):
+    filled = int(length * current / total)
+    empty = length - filled
+    return f"[{'■' * filled}{'□' * empty}] Step {current}/{total}"
+
+# ---------------------- Wizard Class ----------------------
+class SetupWizard(discord.ui.View):
+    def __init__(self, user_id: int, ctx_or_interaction):
         super().__init__(timeout=300)
         self.user_id = user_id
+        self.ctx_or_interaction = ctx_or_interaction
         self.step = 1
         self.config = load_json("config.json")
-    
-    async def update_embed(self, interaction: discord.Interaction, step_complete: bool = True):
-        steps = {
-            1: ("Moderation Channel", "Select the channel for moderation logs"),
-            2: ("Punishment Configuration", "Configure punishment tier roles"),
-            3: ("Economy Settings", "Set up economy parameters"),
-            4: ("Election Channel", "Select the channel for elections"),
-            5: ("Party Tracking", "Configure party role assignments"),
-            6: ("Complete", "Setup wizard complete!")
-        }
-        
-        progress = progress_bar(self.step, 6, 20)
-        
-        title, desc = steps[self.step]
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.GEAR} SETUP WIZARD - Step {self.step}/6",
-            description=f"**{title}**\n\n{desc}\n\n{progress}",
-            color=Colors.NEON_PURPLE
-        )
-        
-        await interaction.response.edit_message(embed=embed, view=self)
-    
-    @discord.ui.button(label="Next Step", style=discord.ButtonStyle.primary, emoji="➡️")
-    async def next_step(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This setup isn't for you!", ephemeral=True)
-            return
-        
-        self.step += 1
-        
-        if self.step > 6:
-            save_json("config.json", self.config)
-            
-            embed = create_hologram_embed(
-                title=f"{Emojis.CHECK} SETUP COMPLETE!",
-                description=f"**{BOT_NAME}** has been configured successfully!\n\nYour server is now ready to use all features.",
-                color=Colors.SUCCESS
-            )
-            
-            for item in self.children:
-                item.disabled = True
-            
-            await interaction.response.edit_message(embed=embed, view=self)
-            self.stop()
-        else:
-            await self.update_embed(interaction)
-    
-    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, emoji="⏭️")
-    async def skip_step(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This setup isn't for you!", ephemeral=True)
-            return
-        
-        self.step += 1
-        
-        if self.step > 6:
-            save_json("config.json", self.config)
-            
-            embed = create_hologram_embed(
-                title=f"{Emojis.CHECK} SETUP COMPLETE!",
-                description=f"**{BOT_NAME}** has been configured!\n\nSome steps were skipped. You can run `/setup` again to configure them.",
-                color=Colors.SUCCESS
-            )
-            
-            for item in self.children:
-                item.disabled = True
-            
-            await interaction.response.edit_message(embed=embed, view=self)
-            self.stop()
-        else:
-            await self.update_embed(interaction)
+        self.selected_channel = None
+        self.selected_roles = []
+        self.economy_value = 100
+        self.cooldown_seconds = 60
 
+        # Populate dropdowns dynamically
+        guild = ctx_or_interaction.guild
+        self.channel_options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in guild.text_channels]
+        self.role_options = [discord.SelectOption(label=r.name, value=str(r.id)) for r in guild.roles if r != guild.default_role]
+
+        # Setup dropdowns
+        self.channel_dropdown = discord.ui.Select(
+            placeholder="Select moderation channel",
+            min_values=1,
+            max_values=1,
+            options=self.channel_options
+        )
+        self.channel_dropdown.callback = self.select_channel
+        self.add_item(self.channel_dropdown)
+
+        self.roles_dropdown = discord.ui.Select(
+            placeholder="Select punishment roles",
+            min_values=1,
+            max_values=5,
+            options=self.role_options
+        )
+        self.roles_dropdown.callback = self.select_roles
+        self.add_item(self.roles_dropdown)
+
+    # ---------------- Update embed with live preview ----------------
+    async def update_embed(self):
+        steps = {
+            1: ("Moderation Channel", "Select the channel for moderation logs."),
+            2: ("Punishment Roles", "Select roles for punishments."),
+            3: ("Economy Settings", "Set starting wallet amount."),
+            4: ("Cooldown Settings", "Set cooldown in seconds."),
+            5: ("Summary", "Review selections and save configuration.")
+        }
+        title, desc = steps[self.step]
+
+        embed_desc = f"{desc}\n\n{progress_bar(self.step, len(steps))}"
+
+        # Live preview of selections
+        embed_desc += f"\n\n**Selected Channel:** {self.selected_channel.mention if self.selected_channel else 'None'}"
+        embed_desc += f"\n**Selected Roles:** {', '.join([r.mention for r in self.selected_roles]) if self.selected_roles else 'None'}"
+        embed_desc += f"\n**Starting Wallet:** {self.economy_value}"
+        embed_desc += f"\n**Cooldown:** {self.cooldown_seconds} seconds"
+
+        embed = create_embed(f"⚙️ Setup Wizard - Step {self.step}", embed_desc)
+
+        # Update the message
+        await self.ctx_or_interaction.edit_original_response(embed=embed, view=self)
+
+    # ---------------- Dropdown callbacks ----------------
+    async def select_channel(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This wizard isn't for you!", ephemeral=True)
+            return
+        self.selected_channel = interaction.guild.get_channel(int(interaction.data["values"][0]))
+        await interaction.response.send_message(f"Selected channel: {self.selected_channel.mention}", ephemeral=True)
+        await self.update_embed()
+
+    async def select_roles(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This wizard isn't for you!", ephemeral=True)
+            return
+        self.selected_roles = [interaction.guild.get_role(int(rid)) for rid in interaction.data["values"]]
+        await interaction.response.send_message(f"Selected roles: {', '.join([r.mention for r in self.selected_roles])}", ephemeral=True)
+        await self.update_embed()
+
+    # ---------------- Modals for numeric input ----------------
+    async def prompt_economy_modal(self, interaction: discord.Interaction):
+        class EconomyModal(discord.ui.Modal, title="Economy Settings"):
+            amount = discord.ui.TextInput(label="Starting Wallet Amount", default=str(self.economy_value))
+
+            async def on_submit(modal_interaction: discord.Interaction):
+                self.economy_value = int(self.amount.value)
+                await modal_interaction.response.send_message(f"Starting wallet set to {self.economy_value}", ephemeral=True)
+                await self.update_embed()
+        await interaction.response.send_modal(EconomyModal())
+
+    async def prompt_cooldown_modal(self, interaction: discord.Interaction):
+        class CooldownModal(discord.ui.Modal, title="Cooldown Settings"):
+            seconds = discord.ui.TextInput(label="Cooldown in Seconds", default=str(self.cooldown_seconds))
+
+            async def on_submit(modal_interaction: discord.Interaction):
+                self.cooldown_seconds = int(self.seconds.value)
+                await modal_interaction.response.send_message(f"Cooldown set to {self.cooldown_seconds}s", ephemeral=True)
+                await self.update_embed()
+        await interaction.response.send_modal(CooldownModal())
+
+    # ---------------- Buttons ----------------
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.success, emoji="➡️")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This wizard isn't for you!", ephemeral=True)
+            return
+
+        # Trigger modals for numeric input steps
+        if self.step == 3:
+            await self.prompt_economy_modal(interaction)
+            return
+        elif self.step == 4:
+            await self.prompt_cooldown_modal(interaction)
+            return
+
+        self.step += 1
+        if self.step > 5:
+            # Save config
+            self.config["moderation_channel"] = self.selected_channel.id if self.selected_channel else None
+            self.config["punishment_roles"] = [r.id for r in self.selected_roles]
+            self.config["economy_start"] = self.economy_value
+            self.config["cooldown"] = self.cooldown_seconds
+            save_json("config.json", self.config)
+
+            for item in self.children:
+                item.disabled = True
+            embed = create_embed("✅ Setup Complete!", "Configuration saved successfully!")
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+        else:
+            await self.update_embed()
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, emoji="⏭️")
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This wizard isn't for you!", ephemeral=True)
+            return
+        self.step += 1
+        await self.update_embed()
+
+# ---------------- Handler ----------------
 async def setup_handler(ctx_or_interaction):
-    """Unified setup handler"""
     is_slash = isinstance(ctx_or_interaction, discord.Interaction)
     user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
-    
-    user_tier = get_user_punishment_tier(user)
-    if user_tier < 4:
-        embed = create_glass_embed(
-            title=f"{Emojis.SHIELD} UNAUTHORIZED",
-            description="You need Tier 4+ permissions to run the setup wizard!",
-            color=Colors.ERROR
-        )
-        if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            await ctx_or_interaction.send(embed=embed)
-        return
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.GEAR} SETUP WIZARD",
-        description=f"Welcome to the **{BOT_NAME}** setup wizard!\n\nThis will guide you through configuring the bot for your server.\n\n{progress_bar(1, 6, 20)}\n\n**Step 1: Moderation Channel**\nSelect the channel for moderation logs.",
-        color=Colors.NEON_PURPLE
-    )
-    
-    view = SetupView(user.id)
-    
+
+    embed = create_embed("⚙️ Setup Wizard", "Welcome! This wizard will guide you through setting up the bot.\n\nUse the dropdowns, modals, and buttons to configure settings.")
+    view = SetupWizard(user.id, ctx_or_interaction)
+
     if is_slash:
         await ctx_or_interaction.response.send_message(embed=embed, view=view)
     else:
         await ctx_or_interaction.send(embed=embed, view=view)
 
-@bot.tree.command(name="setup", description="Run the setup wizard")
+# ---------------- Commands ----------------
+@bot.tree.command(name="setup", description="Run the professional setup wizard")
 async def setup_slash(interaction: discord.Interaction):
-    async with get_command_lock("setup"):
-        await setup_handler(interaction)
+    await setup_handler(interaction)
 
-@bot.command(name="setup")
+@bot.command(name="setup", aliases=["wizard"])
 async def setup_prefix(ctx):
-    async with get_command_lock("setup"):
-        await setup_handler(ctx)
-
+    await setup_handler(ctx)
+    
 # ══════════════════════════════════════════════════════════════════════════════
 # SECRET ADMIN RIGGING PANEL (PREFIX ONLY)
 # ══════════════════════════════════════════════════════════════════════════════
