@@ -1848,251 +1848,257 @@ async def hangman_prefix(ctx):
     async with get_command_lock("hangman"):
         await hangman_handler(ctx)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# GTW (GUESS THE WORD) GAME
-# ══════════════════════════════════════════════════════════════════════════════
+import discord
+from discord.ext import commands
+from discord import app_commands
+import asyncio
+import random
+import uuid
+import time
+from typing import List, Dict
 
+# ------------------------- Global Data -------------------------
 gtw_sessions: Dict[int, dict] = {}
+user_economy: Dict[int, dict] = {}  # Example wallet/leaderboard
 
-class GTWVotingView(discord.ui.View):
-    def __init__(self, session_id: str, players: List[discord.Member], impostor_id: int):
-        super().__init__(timeout=45)
-        self.session_id = session_id
-        self.players = players
-        self.impostor_id = impostor_id
-        self.votes: Dict[int, int] = {}
-        self.voted_users: set = set()
-        self.vote_lock = asyncio.Lock()
-        self.processed_interactions: set = set()
-        
-        for player in players:
-            button = discord.ui.Button(
-                label=player.display_name[:20],
-                custom_id=f"gtw_vote_{session_id}_{player.id}_{uuid.uuid4().hex[:6]}",
-                style=discord.ButtonStyle.secondary
-            )
-            button.callback = self.create_vote_callback(player.id)
-            self.add_item(button)
-    
-    def create_vote_callback(self, target_id: int):
-        async def callback(interaction: discord.Interaction):
-            interaction_token = f"{self.session_id}_{interaction.user.id}_{interaction.id}"
-            error_msg = None
-            success = False
-            should_stop = False
-            
-            async with self.vote_lock:
-                if interaction_token in self.processed_interactions:
-                    try:
-                        await interaction.response.defer()
-                    except:
-                        pass
-                    return
-                
-                if interaction.user.id in self.voted_users:
-                    error_msg = "You already voted!"
-                elif interaction.user.id == target_id:
-                    error_msg = "You can't vote for yourself!"
-                elif interaction.user.id not in [p.id for p in self.players]:
-                    error_msg = "You're not in this game!"
-                else:
-                    self.processed_interactions.add(interaction_token)
-                    self.voted_users.add(interaction.user.id)
-                    self.votes[target_id] = self.votes.get(target_id, 0) + 1
-                    success = True
-                    should_stop = len(self.voted_users) >= len(self.players)
-            
-            if error_msg:
-                await interaction.response.send_message(error_msg, ephemeral=True)
-            elif success:
-                await interaction.response.send_message(f"You voted for <@{target_id}>!", ephemeral=True)
-                if should_stop:
-                    self.stop()
-        return callback
+# ---------------------- Helper Functions ----------------------
 
-async def gtw_handler(ctx_or_interaction, players: List[discord.Member] = None):
-    """Unified GTW game handler"""
+def load_json(file_path):
+    import json
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(file_path, data):
+    import json
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+def get_user_economy(user_id: int):
+    if user_id not in user_economy:
+        user_economy[user_id] = {"wallet": 0, "total_earned": 0}
+    return user_economy[user_id]
+
+def update_user_economy(user_id: int, data: dict):
+    user_economy[user_id] = data
+
+def create_embed(title, description, color=0x3498DB):
+    return discord.Embed(title=title, description=f"```{description}```", color=color)
+
+# ---------------------- GTW Game ----------------------
+
+async def gtw_handler(ctx_or_interaction, players: List[discord.Member]):
     is_slash = isinstance(ctx_or_interaction, discord.Interaction)
-    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
     channel = ctx_or_interaction.channel
-    
-    if not players or len(players) < 3:
-        embed = create_glass_embed(
-            title=f"{Emojis.SPARKLE} GUESS THE WORD",
-            description="You need at least **3 players** to start!\n\nUsage: `gtw @player1 @player2 @player3 ...`",
-            color=Colors.WARNING
-        )
+
+    if len(players) < 3:
+        embed = create_embed("⚠️ GUESS THE WORD", "At least **3 players** required!", 0xE67E22)
         if is_slash:
-            await ctx_or_interaction.response.send_message(embed=embed)
+            await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await ctx_or_interaction.send(embed=embed)
         return
-    
+
     session_id = str(uuid.uuid4())[:8]
-    impostor = random.choice(players)
-    
+    num_players = len(players)
+    impostor_count = 1 if num_players <= 5 else 1 + (num_players - 5) // 4
+    impostors = random.sample(players, impostor_count)
+
     gtw_words = load_json("gtw_words.json")
     prompt_pair = random.choice(gtw_words["prompts"])
-    
+
     session = {
         "id": session_id,
         "players": [p.id for p in players],
-        "impostor": impostor.id,
+        "impostors": [p.id for p in impostors],
         "prompt_normal": prompt_pair["normal"],
         "prompt_impostor": prompt_pair["impostor"],
         "answers": {},
         "round": 1,
         "max_rounds": 3,
-        "message_id": None,
         "channel_id": channel.id
     }
     gtw_sessions[channel.id] = session
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.GLASS} GUESS THE WORD",
-        description=f"**Session:** `{session_id}`\n**Players:** {', '.join([p.display_name for p in players])}\n**Rounds:** 3\n\n**Rules:**\n• Reply to this message with your 1-2 word answer\n• One player is the impostor with a different prompt\n• Find the impostor!\n\n**Round 1 Prompt:**\n```{prompt_pair['normal']}```",
-        color=Colors.NEON_PURPLE
-    )
-    embed.set_footer(text=f"◈ {FOOTER_TEXT} ◈ | Reply to this message with your answer!")
-    
+
+    # DM Prompts
     for player in players:
         try:
-            if player.id == impostor.id:
-                dm_embed = create_glass_embed(
-                    title=f"{Emojis.GLASS} YOU ARE THE IMPOSTOR!",
-                    description=f"Your prompt is different:\n```{prompt_pair['impostor']}```\n\nBlend in with the others!",
-                    color=Colors.ERROR
-                )
+            if player in impostors:
+                dm_embed = create_embed("⚠️ YOU ARE THE IMPOSTOR!", f"Your prompt:\n{prompt_pair['impostor']}", 0xE74C3C)
             else:
-                dm_embed = create_glass_embed(
-                    title=f"{Emojis.GLASS} GTW - Round 1",
-                    description=f"Your prompt:\n```{prompt_pair['normal']}```",
-                    color=Colors.INFO
-                )
+                dm_embed = create_embed("💡 GUESS THE WORD", f"Your prompt:\n{prompt_pair['normal']}", 0x3498DB)
             await player.send(embed=dm_embed)
         except:
             pass
-    
+
+    # Send Game Start Embed
+    embed = create_embed(
+        "🎮 GUESS THE WORD",
+        f"**Session:** {session_id}\n**Players:** {', '.join([p.display_name for p in players])}\n**Rounds:** {session['max_rounds']}\n\nReply to this message with your 1-2 word answers.",
+        0x9B59B6
+    )
+
     if is_slash:
         await ctx_or_interaction.response.send_message(embed=embed)
-        message = await ctx_or_interaction.original_response()
+        msg = await ctx_or_interaction.original_response()
     else:
-        message = await ctx_or_interaction.send(embed=embed)
-    
-    session["message_id"] = message.id
-    
-    valid_answers = 0
-    banned_words = ["best", "worst", "bad", "good", "holiday", "nice", "great", "terrible"]
-    
-    def check_answer(m):
-        if m.reference and m.reference.message_id == session["message_id"]:
-            if m.author.id in session["players"]:
-                words = m.content.strip().split()
-                if 1 <= len(words) <= 2:
-                    if not any(bw in m.content.lower() for bw in banned_words):
-                        return True
-        return False
-    
-    timeout_time = 90 * session["max_rounds"]
-    start_time = time.time()
-    
-    while valid_answers < 9 and time.time() - start_time < timeout_time:
-        try:
-            response = await bot.wait_for("message", check=check_answer, timeout=30)
-            player_id = response.author.id
-            
-            if player_id not in session["answers"]:
-                session["answers"][player_id] = []
-            session["answers"][player_id].append(response.content.strip())
-            valid_answers += 1
-            
-        except asyncio.TimeoutError:
-            if valid_answers >= 3:
-                break
-            continue
-    
-    if valid_answers < 3:
-        embed = create_glass_embed(
-            title=f"{Emojis.CROSS} GAME CANCELLED",
-            description="Not enough answers received!",
-            color=Colors.ERROR
-        )
-        await channel.send(embed=embed)
-        del gtw_sessions[channel.id]
-        return
-    
-    view = GTWVotingView(session_id, players, impostor.id)
-    
-    answers_text = "\n".join([f"**{bot.get_user(pid).display_name}:** {', '.join(ans)}" for pid, ans in session["answers"].items()])
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.VOTE} VOTING TIME!",
-        description=f"**Answers:**\n{answers_text}\n\n**Vote for who you think is the impostor!**",
-        color=Colors.NEON_CYAN
-    )
-    
-    vote_message = await channel.send(embed=embed, view=view)
-    
-    await view.wait()
-    
-    if view.votes:
-        most_voted = max(view.votes, key=view.votes.get)
-        most_votes = view.votes[most_voted]
-    else:
-        most_voted = None
-        most_votes = 0
-    
-    if most_voted == impostor.id:
-        result = f"{Emojis.TROPHY} **PLAYERS WIN!**\n\nThe impostor was **{impostor.display_name}** and they were caught!"
-        color = Colors.SUCCESS
-        
-        for player in players:
-            if player.id != impostor.id:
-                user_data = get_user_economy(player.id)
-                user_data["wallet"] += 100
-                user_data["total_earned"] += 100
-                update_user_economy(player.id, user_data)
-    else:
-        result = f"{Emojis.FIRE} **IMPOSTOR WINS!**\n\nThe impostor was **{impostor.display_name}** and they escaped!"
-        color = Colors.ERROR
-        
-        user_data = get_user_economy(impostor.id)
-        user_data["wallet"] += 200
-        user_data["total_earned"] += 200
-        update_user_economy(impostor.id, user_data)
-    
-    stats = load_json("games_stats.json")
-    for player in players:
-        pid = str(player.id)
-        if pid not in stats["gtw"]["leaderboard"]:
-            stats["gtw"]["leaderboard"][pid] = {"wins": 0, "losses": 0, "impostor_wins": 0}
-        
-        if player.id == impostor.id:
-            if most_voted != impostor.id:
-                stats["gtw"]["leaderboard"][pid]["impostor_wins"] += 1
-                stats["gtw"]["leaderboard"][pid]["wins"] += 1
-            else:
-                stats["gtw"]["leaderboard"][pid]["losses"] += 1
-        else:
-            if most_voted == impostor.id:
-                stats["gtw"]["leaderboard"][pid]["wins"] += 1
-            else:
-                stats["gtw"]["leaderboard"][pid]["losses"] += 1
-    save_json("games_stats.json", stats)
-    
-    vote_breakdown = "\n".join([f"<@{uid}>: **{count}** votes" for uid, count in view.votes.items()])
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.GLASS} GAME OVER!",
-        description=f"{result}\n\n**Vote Breakdown:**\n{vote_breakdown}\n\n**Normal Prompt:** {session['prompt_normal']}\n**Impostor Prompt:** {session['prompt_impostor']}",
-        color=color
-    )
-    
-    await channel.send(embed=embed)
-    
-    if channel.id in gtw_sessions:
-        del gtw_sessions[channel.id]
+        msg = await ctx_or_interaction.send(embed=embed)
 
+    session["message_id"] = msg.id
+    banned_words = ["best", "worst", "bad", "good", "holiday", "nice", "great", "terrible"]
+
+    # ---------------------- Rounds ----------------------
+    for r in range(1, session["max_rounds"] + 1):
+        round_embed = create_embed(f"Round {r}", f"Prompt: {prompt_pair['normal']}", 0x8E44AD)
+        round_msg = await channel.send(embed=round_embed)
+        session["answers"][r] = {}
+
+        def check(m):
+            return m.reference and m.reference.message_id == round_msg.id and m.author.id in session["players"] \
+                   and 1 <= len(m.content.split()) <= 2 and not any(bw in m.content.lower() for bw in banned_words)
+
+        round_end = time.time() + 90
+        while time.time() < round_end:
+            try:
+                m = await bot.wait_for("message", check=check, timeout=10)
+                session["answers"][r][m.author.id] = m.content.strip()
+            except asyncio.TimeoutError:
+                continue
+
+    # ---------------------- Continue or Vote ----------------------
+    await gtw_continue_or_vote(channel, session)
+
+# ---------------------- Continue or Vote ----------------------
+class ContinueOrVoteView(discord.ui.View):
+    def __init__(self, session_id, players):
+        super().__init__(timeout=60)
+        self.session_id = session_id
+        self.players = players
+        self.choices: Dict[int, str] = {}
+
+        for player in players:
+            continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.success)
+            vote_btn = discord.ui.Button(label="Vote", style=discord.ButtonStyle.danger)
+            continue_btn.callback = self.create_callback(player.id, "continue")
+            vote_btn.callback = self.create_callback(player.id, "vote")
+            self.add_item(continue_btn)
+            self.add_item(vote_btn)
+
+    def create_callback(self, player_id, choice):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != player_id:
+                await interaction.response.send_message("This button is not for you.", ephemeral=True)
+                return
+            self.choices[player_id] = choice
+            await interaction.response.send_message(f"You chose **{choice}**!", ephemeral=True)
+            if len(self.choices) >= len(self.players):
+                self.stop()
+        return callback
+
+async def gtw_continue_or_vote(channel, session):
+    players = [bot.get_user(pid) for pid in session["players"]]
+    view = ContinueOrVoteView(session["id"], players)
+    embed = create_embed("⚡ Continue or Vote?", "Majority decides: Continue game or vote on impostor.", 0xF1C40F)
+    msg = await channel.send(embed=embed, view=view)
+    await view.wait()
+
+    continue_count = list(view.choices.values()).count("continue")
+    vote_count = list(view.choices.values()).count("vote")
+
+    if continue_count >= vote_count:
+        await channel.send("✅ Majority chose **Continue**! Starting next round...")
+        session["round"] += 1
+        await gtw_handler(channel, players)
+    else:
+        await gtw_voting_phase(channel, session)
+
+# ---------------------- Voting Phase ----------------------
+class GTWVotingView(discord.ui.View):
+    def __init__(self, session_id: str, players: List[discord.Member], impostors: List[int]):
+        super().__init__(timeout=60)
+        self.session_id = session_id
+        self.players = players
+        self.impostors = impostors
+        self.votes: Dict[int, int] = {}
+        self.voted_users: set = set()
+
+        for player in players:
+            button = discord.ui.Button(label=player.display_name[:20], style=discord.ButtonStyle.secondary)
+            button.callback = self.create_vote_callback(player.id)
+            self.add_item(button)
+
+    def create_vote_callback(self, target_id: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id in self.voted_users:
+                await interaction.response.send_message("Already voted!", ephemeral=True)
+                return
+
+            self.voted_users.add(interaction.user.id)
+            self.votes[target_id] = self.votes.get(target_id, 0) + 1
+            await interaction.response.send_message(f"You voted for <@{target_id}>!", ephemeral=True)
+
+            if len(self.voted_users) >= len(self.players):
+                self.stop()
+        return callback
+
+async def gtw_voting_phase(channel, session):
+    players = [bot.get_user(pid) for pid in session["players"]]
+    view = GTWVotingView(session["id"], players, session["impostors"])
+    embed = create_embed("🗳️ Voting Phase", "Vote for who you think is the impostor!", 0x1ABC9C)
+    vote_msg = await channel.send(embed=embed, view=view)
+    await view.wait()
+
+    if view.votes:
+        max_votes = max(view.votes.values())
+        candidates = [pid for pid, count in view.votes.items() if count == max_votes]
+
+        if len(candidates) > 1:
+            # Tie -> Interactive RPS
+            await channel.send("Tie detected! React with ✊, ✋, ✌️ for RPS to decide.")
+            rps_winner = await gtw_rps(channel, candidates)
+            eliminated_id = rps_winner
+        else:
+            eliminated_id = candidates[0]
+
+        if eliminated_id in session["impostors"]:
+            await channel.send(f"🎉 The impostor <@{eliminated_id}> was caught!")
+        else:
+            await channel.send(f"❌ <@{eliminated_id}> was eliminated but was not an impostor!")
+
+# ---------------------- RPS Tie-Breaker ----------------------
+async def gtw_rps(channel, candidates):
+    moves = {"✊": "rock", "✋": "paper", "✌️": "scissors"}
+    player_moves = {}
+
+    def check(reaction, user):
+        return user.id in candidates and str(reaction.emoji) in moves
+
+    await channel.send(f"Tie between: {', '.join([f'<@{c}>' for c in candidates])}. First to choose wins RPS!")
+
+    while len(player_moves) < len(candidates):
+        try:
+            reaction, user = await bot.wait_for("reaction_add", timeout=30.0, check=check)
+            if user.id not in player_moves:
+                player_moves[user.id] = moves[str(reaction.emoji)]
+                await channel.send(f"<@{user.id}> chose {moves[str(reaction.emoji)]}")
+        except asyncio.TimeoutError:
+            break
+
+    # Determine winner randomly if tie persists
+    if len(player_moves) < len(candidates):
+        loser = random.choice(candidates)
+    else:
+        ids = list(player_moves.keys())
+        m1, m2 = player_moves[ids[0]], player_moves[ids[1]]
+        # RPS logic
+        if m1 == m2:
+            loser = random.choice(ids)
+        elif (m1, m2) in [("rock", "scissors"), ("paper", "rock"), ("scissors", "paper")]:
+            loser = ids[1]
+        else:
+            loser = ids[0]
+    return loser
+
+# ---------------------- Commands ----------------------
 @bot.tree.command(name="gtw", description="Start a Guess The Word game")
 @app_commands.describe(player1="First player", player2="Second player", player3="Third player")
 async def gtw_slash(interaction: discord.Interaction, player1: discord.Member, player2: discord.Member, player3: discord.Member):
@@ -2109,7 +2115,7 @@ async def gtw_prefix(ctx, *members: discord.Member):
         if ctx.author not in players:
             players.append(ctx.author)
         await gtw_handler(ctx, players)
-
+        
 # ══════════════════════════════════════════════════════════════════════════════
 # GYI (GUESS YOUR IMPOSTOR) GAME
 # ══════════════════════════════════════════════════════════════════════════════
