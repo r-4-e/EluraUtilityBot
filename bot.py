@@ -1847,51 +1847,94 @@ async def hangman_slash(interaction: discord.Interaction):
 async def hangman_prefix(ctx):
     async with get_command_lock("hangman"):
         await hangman_handler(ctx)
-
+# ─────────────────────────────────────────────────────────────
+# Elura GTW & GYI Discord Game Bot
+# ─────────────────────────────────────────────────────────────
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
 import random
-import uuid
 import time
 from typing import List, Dict
 
-# ------------------------- GTW Manager -------------------------
-class GTWManager:
-    def __init__(self, bot):
+# ------------------------- Helper Functions -------------------------
+def load_json(file_path: str):
+    """Load a JSON file and return its contents."""
+    import json
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(file_path: str, data: dict):
+    """Save a Python dict to a JSON file."""
+    import json
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def create_embed(title: str, description: str, color: int = 0x3498DB):
+    """Create a discord.Embed with default style."""
+    return discord.Embed(title=title, description=description, color=color)
+
+def progress_bar(current: int, total: int, length: int = 20):
+    """Return a text-based progress bar."""
+    filled = int(current / total * length)
+    return "▓" * filled + "░" * (length - filled)
+
+def get_bot_user(bot: commands.Bot, user_id: int):
+    """Helper to fetch bot user object from ID."""
+    return bot.get_user(user_id)
+
+# ------------------------- Shared Game Manager -------------------------
+class GameManager:
+    """Unified manager for GTW and GYI games with shared logic."""
+    def __init__(self, bot: commands.Bot, game_type: str):
+        """
+        :param bot: discord.Bot or commands.Bot instance
+        :param game_type: 'GTW' or 'GYI'
+        """
         self.bot = bot
-        self.lobbies: Dict[str, dict] = {}  # code -> lobby data
-        self.cooldowns: Dict[int, float] = {}  # user_id -> last create time
-        self.lobby_timeout = 600  # 10 minutes auto-delete
+        self.game_type = game_type
+        self.lobbies: Dict[str, dict] = {}  # lobby code -> lobby dict
+        self.cooldowns: Dict[int,float] = {}  # user_id -> last lobby create timestamp
+        self.config = load_json("config.json").get("gtw", {})  # shared settings
         self.cleanup_task.start()
 
-    # ----------------- Lobby Management -----------------
-    def generate_code(self, length=4):
-        return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=length))
+    # ----------------- Word Handling -----------------
+    def load_words(self) -> list:
+        """Load words from respective JSON based on game type."""
+        if self.game_type == "GTW":
+            return load_json("gtw_words.json").get("prompts", [{"normal":"WORD1","impostor":"WORD2"}])
+        else:
+            return load_json("gyi_words.json").get("pairs", [{"normal":"WORD1","impostor":"WORD2"}])
 
-    async def create_lobby(self, host: discord.Member, channel: discord.TextChannel):
+    # ----------------- Lobby Creation -----------------
+    async def create_lobby(self, host: discord.Member, channel: discord.TextChannel, optional_players: List[discord.Member]=[]):
+        """Create a new lobby with optional extra players."""
         now = time.time()
-        if host.id in self.cooldowns and now - self.cooldowns[host.id] < 60:
-            return None, f"⏳ You must wait before creating another lobby!"
-        code = self.generate_code()
+        if host.id in self.cooldowns and now - self.cooldowns[host.id] < self.config.get("cooldown",60):
+            return None, f"⏳ You must wait before creating another lobby."
+
+        code = ''.join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=4))
         self.cooldowns[host.id] = now
+
+        players = [host] + optional_players
         self.lobbies[code] = {
             "host": host.id,
             "channel": channel.id,
-            "players": [host.id],
+            "players": [p.id for p in players],
             "started": False,
             "prompts": [],
             "round": 1,
-            "max_rounds": 3,
+            "max_rounds": self.config.get("max_rounds",3),
             "answers": {},
             "impostors": [],
             "message_id": None,
             "created_at": now
         }
-        return code, f"🎮 Lobby created! Code: `{code}`. Host: {host.display_name}"
+        return code, f"🎮 {self.game_type} Lobby `{code}` created by {host.display_name} with {len(players)} player(s)."
 
     async def join_lobby(self, user: discord.Member, code: str):
+        """Add a user to an existing lobby."""
         lobby = self.lobbies.get(code)
         if not lobby:
             return f"❌ Lobby `{code}` not found."
@@ -1902,63 +1945,71 @@ class GTWManager:
         lobby["players"].append(user.id)
         return f"✅ {user.display_name} joined lobby `{code}`!"
 
+    # ----------------- Start Lobby -----------------
     async def start_lobby(self, code: str):
+        """Start the game in a lobby, assign impostors, DM words."""
         lobby = self.lobbies.get(code)
         if not lobby or lobby["started"]:
             return False
+
         channel = self.bot.get_channel(lobby["channel"])
         players = [self.bot.get_user(pid) for pid in lobby["players"]]
 
         if len(players) < 3:
-            await channel.send("⚠️ Need at least **3 players** to start the game.")
+            await channel.send("⚠️ Need at least 3 players to start!")
             return False
 
+        # ----------------- Impostor Assignment -----------------
         num_players = len(players)
-        impostor_count = 1 if num_players <= 5 else 1 + (num_players - 5) // 4
+        max_impostors = self.config.get("max_impostors",2)
+        impostor_count = min(max(1, num_players//4), max_impostors)
         impostors = random.sample(players, impostor_count)
         lobby["impostors"] = [p.id for p in impostors]
 
-        gtw_words = load_json("gtw_words.json")
-        prompt_pair = random.choice(gtw_words["prompts"])
+        # ----------------- Word Assignment -----------------
+        word_list = self.load_words()
+        prompt_pair = random.choice(word_list)
         lobby["prompts"] = [prompt_pair]
 
+        # ----------------- DM Words -----------------
         for p in players:
             try:
                 if p.id in lobby["impostors"]:
-                    embed = create_embed("⚠️ YOU ARE THE IMPOSTOR!", f"Prompt: {prompt_pair['impostor']}", 0xE74C3C)
+                    embed = create_embed(f"⚠️ YOU ARE THE IMPOSTOR!", f"Your word: {prompt_pair['impostor']}", 0xE74C3C)
                 else:
-                    embed = create_embed("💡 GUESS THE WORD", f"Prompt: {prompt_pair['normal']}", 0x3498DB)
+                    embed = create_embed(f"💡 YOUR WORD", f"Your word: {prompt_pair['normal']}", 0x3498DB)
                 await p.send(embed=embed)
             except:
-                pass
+                continue
 
         lobby["started"] = True
         lobby["round"] = 1
         await self.run_round(code)
         return True
 
-    # ----------------- Round Logic -----------------
+    # ----------------- Run Game Rounds -----------------
     async def run_round(self, code: str):
+        """Run all rounds of the game, handle banned words and player messages."""
         lobby = self.lobbies.get(code)
-        if not lobby:
-            return
+        if not lobby: return
         channel = self.bot.get_channel(lobby["channel"])
         players = [self.bot.get_user(pid) for pid in lobby["players"]]
         prompt_pair = lobby["prompts"][0]
 
-        for r in range(lobby["round"], lobby["max_rounds"] + 1):
+        banned_words = self.config.get("banned_words", ["bad","good","best","worst"])
+        round_time = self.config.get("round_time", 90)
+
+        for r in range(lobby["round"], lobby["max_rounds"]+1):
             lobby["round"] = r
             embed = create_embed(f"Round {r}", f"Prompt: {prompt_pair['normal']}", 0x8E44AD)
             msg = await channel.send(embed=embed)
             lobby["answers"][r] = {}
 
-            banned_words = ["best","worst","bad","good","holiday","nice","great","terrible"]
-
             def check(m):
-                return m.reference and m.reference.message_id == msg.id and m.author.id in lobby["players"] \
-                       and 1 <= len(m.content.split()) <= 2 and not any(bw in m.content.lower() for bw in banned_words)
+                return m.reference and m.reference.message_id==msg.id and m.author.id in lobby["players"] \
+                       and 1<=len(m.content.split())<=2 and not any(bw in m.content.lower() for bw in banned_words)
 
-            round_end = time.time() + 90
+            round_end = time.time() + round_time
             while time.time() < round_end:
                 try:
                     m = await self.bot.wait_for("message", check=check, timeout=10)
@@ -1973,9 +2024,9 @@ class GTWManager:
         channel = self.bot.get_channel(lobby["channel"])
         players = [self.bot.get_user(pid) for pid in lobby["players"]]
 
-        view = ContinueOrVoteView(lobby["players"])
-        embed = create_embed("⚡ Continue or Vote?", "Majority rules: Continue game or vote on impostor.", 0xF1C40F)
-        msg = await channel.send(embed=embed, view=view)
+        view = ContinueOrVoteView(players)
+        embed = create_embed("⚡ Continue or Vote?", "Majority decides: continue game or vote impostor.", 0xF1C40F)
+        await channel.send(embed=embed, view=view)
         await view.wait()
 
         continue_count = list(view.choices.values()).count("continue")
@@ -1988,22 +2039,22 @@ class GTWManager:
         else:
             await self.voting_phase(lobby)
 
-    # ----------------- Voting -----------------
+    # ----------------- Voting Phase -----------------
     async def voting_phase(self, lobby):
         channel = self.bot.get_channel(lobby["channel"])
         players = [self.bot.get_user(pid) for pid in lobby["players"]]
 
         view = GTWVotingView(players)
         embed = create_embed("🗳️ Voting Phase", "Vote for who you think is the impostor!", 0x1ABC9C)
-        msg = await channel.send(embed=embed, view=view)
+        await channel.send(embed=embed, view=view)
         await view.wait()
 
         if view.votes:
             max_votes = max(view.votes.values())
-            candidates = [pid for pid, count in view.votes.items() if count == max_votes]
+            candidates = [pid for pid,count in view.votes.items() if count==max_votes]
 
             if len(candidates) > 1:
-                await channel.send("Tie detected! Tie players do RPS fight.")
+                await channel.send("Tie detected! Tie-breaker via RPS.")
                 loser = await self.rps(channel, candidates)
             else:
                 loser = candidates[0]
@@ -2013,47 +2064,42 @@ class GTWManager:
             else:
                 await channel.send(f"❌ <@{loser}> was eliminated but was not an impostor!")
 
-    # ----------------- RPS -----------------
+    # ----------------- RPS Tie-breaker -----------------
     async def rps(self, channel, candidates):
         moves = {"✊":"rock","✋":"paper","✌️":"scissors"}
         player_moves = {}
-
         def check(reaction, user):
             return user.id in candidates and str(reaction.emoji) in moves
-
         await channel.send(f"Tie between: {', '.join([f'<@{c}>' for c in candidates])}. React with ✊, ✋, ✌️.")
-
-        while len(player_moves) < len(candidates):
+        while len(player_moves)<len(candidates):
             try:
-                reaction, user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
+                reaction,user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
                 if user.id not in player_moves:
                     player_moves[user.id] = moves[str(reaction.emoji)]
                     await channel.send(f"<@{user.id}> chose {moves[str(reaction.emoji)]}")
             except asyncio.TimeoutError:
                 break
-
-        if len(player_moves) < len(candidates):
+        if len(player_moves)<len(candidates):
             return random.choice(candidates)
-
-        ids = list(player_moves.keys())
-        m1, m2 = player_moves[ids[0]], player_moves[ids[1]]
-        if m1 == m2:
+        ids=list(player_moves.keys())
+        m1,m2=player_moves[ids[0]],player_moves[ids[1]]
+        if m1==m2:
             return random.choice(ids)
         elif (m1,m2) in [("rock","scissors"),("paper","rock"),("scissors","paper")]:
             return ids[1]
         else:
             return ids[0]
 
-    # ----------------- Cleanup -----------------
+    # ----------------- Auto Cleanup -----------------
     @tasks.loop(seconds=60)
     async def cleanup_task(self):
         now = time.time()
-        expired = []
-        for code, lobby in self.lobbies.items():
-            if not lobby["started"] and now - lobby["created_at"] > self.lobby_timeout:
+        expired=[]
+        for code,lobby in self.lobbies.items():
+            if not lobby["started"] and now-lobby["created_at"]>self.config.get("lobby_timeout",600):
                 expired.append(code)
-                channel = self.bot.get_channel(lobby["channel"])
-                host = self.bot.get_user(lobby["host"])
+                channel=self.bot.get_channel(lobby["channel"])
+                host=self.bot.get_user(lobby["host"])
                 if channel:
                     await channel.send(f"⌛ Lobby `{code}` created by {host.display_name} expired due to inactivity.")
         for code in expired:
@@ -2061,311 +2107,80 @@ class GTWManager:
 
 # ------------------------- UI Components -------------------------
 class ContinueOrVoteView(discord.ui.View):
+    """Interactive view for Continue or Vote buttons."""
     def __init__(self, players):
         super().__init__(timeout=60)
         self.choices: Dict[int,str] = {}
         for pid in players:
-            continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.success)
-            vote_btn = discord.ui.Button(label="Vote", style=discord.ButtonStyle.danger)
-            continue_btn.callback = self.make_callback(pid, "continue")
-            vote_btn.callback = self.make_callback(pid, "vote")
+            continue_btn=discord.ui.Button(label="Continue",style=discord.ButtonStyle.success)
+            vote_btn=discord.ui.Button(label="Vote",style=discord.ButtonStyle.danger)
+            continue_btn.callback=self.make_callback(pid,"continue")
+            vote_btn.callback=self.make_callback(pid,"vote")
             self.add_item(continue_btn)
             self.add_item(vote_btn)
-
-    def make_callback(self, pid, choice):
-        async def callback(interaction: discord.Interaction):
-            if interaction.user.id != pid:
-                await interaction.response.send_message("This button is not for you.", ephemeral=True)
+    def make_callback(self,pid,choice):
+        async def callback(interaction:discord.Interaction):
+            if interaction.user.id!=pid:
+                await interaction.response.send_message("This button is not for you.",ephemeral=True)
                 return
-            self.choices[pid] = choice
-            await interaction.response.send_message(f"You chose **{choice}**!", ephemeral=True)
-            if len(self.choices) >= len(self.children)//2:
+            self.choices[pid]=choice
+            await interaction.response.send_message(f"You chose **{choice}**!",ephemeral=True)
+            if len(self.choices)>=len(self.children)//2:
                 self.stop()
         return callback
 
 class GTWVotingView(discord.ui.View):
+    """Voting view for choosing impostor."""
     def __init__(self, players):
         super().__init__(timeout=60)
-        self.votes: Dict[int,int] = {}
-        self.voted_users: set = set()
+        self.votes: Dict[int,int]={}
+        self.voted_users:set=set()
         for p in players:
-            btn = discord.ui.Button(label=p.display_name[:20], style=discord.ButtonStyle.secondary)
-            btn.callback = self.make_callback(p.id)
+            btn=discord.ui.Button(label=p.display_name[:20],style=discord.ButtonStyle.secondary)
+            btn.callback=self.make_callback(p.id)
             self.add_item(btn)
-
-    def make_callback(self, target_id):
-        async def callback(interaction: discord.Interaction):
+    def make_callback(self,target_id):
+        async def callback(interaction:discord.Interaction):
             if interaction.user.id in self.voted_users:
-                await interaction.response.send_message("Already voted!", ephemeral=True)
+                await interaction.response.send_message("Already voted!",ephemeral=True)
                 return
             self.voted_users.add(interaction.user.id)
-            self.votes[target_id] = self.votes.get(target_id,0)+1
-            await interaction.response.send_message(f"You voted for <@{target_id}>!", ephemeral=True)
-            if len(self.voted_users) >= len(self.children):
+            self.votes[target_id]=self.votes.get(target_id,0)+1
+            await interaction.response.send_message(f"You voted for <@{target_id}>!",ephemeral=True)
+            if len(self.voted_users)>=len(self.children):
                 self.stop()
         return callback
 
-# ------------------------- Commands -------------------------
-gtw_manager = None  # Will be set when bot instance is ready
+# ------------------------- Bot Setup -------------------------
+prefixes = ["eu","elura"]
+bot = commands.Bot(command_prefix=prefixes,intents=discord.Intents.all())
+gtw_manager: GameManager = None
+gyi_manager: GameManager = None
 
-# ----------------- Slash Commands -----------------
+@bot.event
+async def on_ready():
+    global gtw_manager, gyi_manager
+    gtw_manager = GameManager(bot, "GTW")
+    gyi_manager = GameManager(bot, "GYI")
+    print(f"{bot.user} is online!")
+
+# ------------------------- Slash Commands -------------------------
 @bot.tree.command(name="gtw_create", description="Create a GTW lobby")
-async def gtw_create(interaction: discord.Interaction):
-    global gtw_manager
-    code, msg = await gtw_manager.create_lobby(interaction.user, interaction.channel)
+@app_commands.describe(optional_players="Optional extra players after the required 3")
+async def gtw_create(interaction: discord.Interaction, optional_players: List[discord.Member] = []):
+    code, msg = await gtw_manager.create_lobby(interaction.user, interaction.channel, optional_players)
     await interaction.response.send_message(msg)
 
-@app_commands.describe(code="Lobby code to join")
-@bot.tree.command(name="gtw_join", description="Join a GTW lobby")
-async def gtw_join(interaction: discord.Interaction, code: str):
-    global gtw_manager
-    msg = await gtw_manager.join_lobby(interaction.user, code.upper())
-    await interaction.response.send_message(msg)
-
-# ----------------- Prefix Commands -----------------
-prefixes = ["eu", "elura"]
-prefix_bot = commands.Bot(command_prefix=prefixes, intents=discord.Intents.all())
-
-@prefix_bot.command(name="gtwcreate")
-async def gtw_create_prefix(ctx):
-    global gtw_manager
-    code, msg = await gtw_manager.create_lobby(ctx.author, ctx.channel)
-    await ctx.send(msg)
-
-@prefix_bot.command(name="gtwjoin")
-async def gtw_join_prefix(ctx, code: str):
-    global gtw_manager
-    msg = await gtw_manager.join_lobby(ctx.author, code.upper())
-    await ctx.send(msg)
-
-# ------------------------- Helper Functions -------------------------
-def load_json(file_path):
-    import json
-    with open(file_path,"r",encoding="utf-8") as f:
-        return json.load(f)
-
-def create_embed(title, description, color=0x3498DB):
-    return discord.Embed(title=title, description=f"```{description}```", color=color)
-    
-# ══════════════════════════════════════════════════════════════════════════════
-# GYI (GUESS YOUR IMPOSTOR) GAME - GTW STYLE
-# ══════════════════════════════════════════════════════════════════════════════
-
-import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-import asyncio, random, uuid, time
-from typing import List, Dict
-
-gyi_lobbies: Dict[str, dict] = {}  # lobby_code -> lobby_data
-gyi_cooldowns: Dict[int, float] = {}  # user_id -> last create timestamp
-
-class GYIManager:
-    def __init__(self, bot):
-        self.bot = bot
-        self.lobbies = gyi_lobbies
-        self.cooldowns = gyi_cooldowns
-        self.lobby_timeout = 600  # 10 min auto delete
-        self.cleanup_task.start()
-
-    # ----------------- Lobby Creation -----------------
-    def generate_code(self, length=4):
-        return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=length))
-
-    async def create_lobby(self, host: discord.Member, channel: discord.TextChannel):
-        now = time.time()
-        if host.id in self.cooldowns and now - self.cooldowns[host.id] < 60:
-            return None, f"⏳ You must wait before creating another lobby!"
-        code = self.generate_code()
-        self.cooldowns[host.id] = now
-        self.lobbies[code] = {
-            "host": host.id,
-            "channel": channel.id,
-            "players": [host.id],
-            "started": False,
-            "prompts": [],
-            "round": 1,
-            "max_rounds": 3,
-            "answers": {},
-            "impostors": [],
-            "message_id": None,
-            "created_at": now
-        }
-        return code, f"🎮 Lobby created! Code: `{code}`. Host: {host.display_name}"
-
-    async def join_lobby(self, user: discord.Member, code: str):
-        lobby = self.lobbies.get(code)
-        if not lobby:
-            return f"❌ Lobby `{code}` not found."
-        if lobby["started"]:
-            return f"❌ Lobby `{code}` has already started."
-        if user.id in lobby["players"]:
-            return f"❌ You are already in this lobby."
-        lobby["players"].append(user.id)
-        return f"✅ {user.display_name} joined lobby `{code}`!"
-
-    # ----------------- Start Game -----------------
-    async def start_lobby(self, code: str):
-        lobby = self.lobbies.get(code)
-        if not lobby or lobby["started"]:
-            return False
-        channel = self.bot.get_channel(lobby["channel"])
-        players = [self.bot.get_user(pid) for pid in lobby["players"]]
-
-        if len(players) < 3:
-            await channel.send("⚠️ Need at least **3 players** to start the game.")
-            return False
-
-        # Multiple impostors logic: all players could be impostors randomly
-        num_players = len(players)
-        impostor_count = 1 if num_players <= 5 else 1 + (num_players - 5) // 4
-        impostors = random.sample(players, impostor_count)
-        lobby["impostors"] = [p.id for p in impostors]
-
-        gyi_words = load_json("gyi_words.json")
-        prompt_pair = random.choice(gyi_words["pairs"])
-        lobby["prompts"] = [prompt_pair]
-
-        for p in players:
-            try:
-                if p.id in lobby["impostors"]:
-                    embed = create_embed("⚠️ YOU ARE THE IMPOSTOR!", f"Your word: {prompt_pair['impostor']}", 0xE74C3C)
-                else:
-                    embed = create_embed("💡 YOUR WORD", f"Your word: {prompt_pair['normal']}", 0x3498DB)
-                await p.send(embed=embed)
-            except:
-                pass
-
-        lobby["started"] = True
-        lobby["round"] = 1
-        await self.run_round(code)
-        return True
-
-    # ----------------- Round Loop -----------------
-    async def run_round(self, code: str):
-        lobby = self.lobbies.get(code)
-        if not lobby: return
-        channel = self.bot.get_channel(lobby["channel"])
-        players = [self.bot.get_user(pid) for pid in lobby["players"]]
-        prompt_pair = lobby["prompts"][0]
-
-        for r in range(lobby["round"], lobby["max_rounds"] + 1):
-            lobby["round"] = r
-            embed = create_embed(f"Round {r}", f"Prompt: {prompt_pair['normal']}", 0x8E44AD)
-            msg = await channel.send(embed=embed)
-            lobby["answers"][r] = {}
-
-            banned_words = ["best","worst","bad","good","holiday","nice","great","terrible"]
-
-            def check(m):
-                return m.reference and m.reference.message_id == msg.id and m.author.id in lobby["players"] \
-                       and 1 <= len(m.content.split()) <= 2 and not any(bw in m.content.lower() for bw in banned_words)
-
-            round_end = time.time() + 90
-            while time.time() < round_end:
-                try:
-                    m = await self.bot.wait_for("message", check=check, timeout=10)
-                    lobby["answers"][r][m.author.id] = m.content.strip()
-                except asyncio.TimeoutError:
-                    continue
-
-        await self.continue_or_vote(lobby)
-
-    # ----------------- Continue / Vote -----------------
-    async def continue_or_vote(self, lobby):
-        channel = self.bot.get_channel(lobby["channel"])
-        players = [self.bot.get_user(pid) for pid in lobby["players"]]
-
-        view = ContinueOrVoteView(lobby["players"])
-        embed = create_embed("⚡ Continue or Vote?", "Majority decides: Continue game or vote on impostor.", 0xF1C40F)
-        msg = await channel.send(embed=embed, view=view)
-        await view.wait()
-
-        continue_count = list(view.choices.values()).count("continue")
-        vote_count = list(view.choices.values()).count("vote")
-
-        if continue_count >= vote_count:
-            await channel.send("✅ Majority chose **Continue**! Starting next round...")
-            lobby["round"] += 1
-            await self.run_round(lobby_code_from_lobby(lobby))
-        else:
-            await self.voting_phase(lobby)
-
-    # ----------------- Voting -----------------
-    async def voting_phase(self, lobby):
-        channel = self.bot.get_channel(lobby["channel"])
-        players = [self.bot.get_user(pid) for pid in lobby["players"]]
-
-        view = GTWVotingView(players)
-        embed = create_embed("🗳️ Voting Phase", "Vote for who you think is the impostor!", 0x1ABC9C)
-        msg = await channel.send(embed=embed, view=view)
-        await view.wait()
-
-        if view.votes:
-            max_votes = max(view.votes.values())
-            candidates = [pid for pid, count in view.votes.items() if count == max_votes]
-
-            if len(candidates) > 1:
-                await channel.send("Tie detected! Tie players do RPS fight.")
-                loser = await self.rps(channel, candidates)
-            else:
-                loser = candidates[0]
-
-            if loser in lobby["impostors"]:
-                await channel.send(f"🎉 The impostor <@{loser}> was caught!")
-            else:
-                await channel.send(f"❌ <@{loser}> was eliminated but was not an impostor!")
-
-    # ----------------- RPS -----------------
-    async def rps(self, channel, candidates):
-        moves = {"✊":"rock","✋":"paper","✌️":"scissors"}
-        player_moves = {}
-
-        def check(reaction, user):
-            return user.id in candidates and str(reaction.emoji) in moves
-
-        await channel.send(f"Tie between: {', '.join([f'<@{c}>' for c in candidates])}. React with ✊, ✋, ✌️.")
-
-        while len(player_moves) < len(candidates):
-            try:
-                reaction, user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
-                if user.id not in player_moves:
-                    player_moves[user.id] = moves[str(reaction.emoji)]
-                    await channel.send(f"<@{user.id}> chose {moves[str(reaction.emoji)]}")
-            except asyncio.TimeoutError:
-                break
-
-        if len(player_moves) < len(candidates):
-            return random.choice(candidates)
-
-        ids = list(player_moves.keys())
-        m1, m2 = player_moves[ids[0]], player_moves[ids[1]]
-        if m1 == m2:
-            return random.choice(ids)
-        elif (m1,m2) in [("rock","scissors"),("paper","rock"),("scissors","paper")]:
-            return ids[1]
-        else:
-            return ids[0]
-
-    # ----------------- Cleanup -----------------
-    @tasks.loop(seconds=60)
-    async def cleanup_task(self):
-        now = time.time()
-        expired = []
-        for code, lobby in self.lobbies.items():
-            if not lobby["started"] and now - lobby["created_at"] > self.lobby_timeout:
-                expired.append(code)
-                channel = self.bot.get_channel(lobby["channel"])
-                host = self.bot.get_user(lobby["host"])
-                if channel:
-                    await channel.send(f"⌛ Lobby `{code}` created by {host.display_name} expired due to inactivity.")
-        for code in expired:
-            del self.lobbies[code]
-
-# ----------------- Slash Commands -----------------
 @bot.tree.command(name="gyi_create", description="Create a GYI lobby")
-async def gyi_create(interaction: discord.Interaction):
-    code, msg = await gyi_manager.create_lobby(interaction.user, interaction.channel)
+@app_commands.describe(optional_players="Optional extra players after the required 3")
+async def gyi_create(interaction: discord.Interaction, optional_players: List[discord.Member] = []):
+    code, msg = await gyi_manager.create_lobby(interaction.user, interaction.channel, optional_players)
+    await interaction.response.send_message(msg)
+
+@bot.tree.command(name="gtw_join", description="Join a GTW lobby")
+@app_commands.describe(code="Lobby code to join")
+async def gtw_join(interaction: discord.Interaction, code: str):
+    msg = await gtw_manager.join_lobby(interaction.user, code.upper())
     await interaction.response.send_message(msg)
 
 @bot.tree.command(name="gyi_join", description="Join a GYI lobby")
@@ -2374,20 +2189,33 @@ async def gyi_join(interaction: discord.Interaction, code: str):
     msg = await gyi_manager.join_lobby(interaction.user, code.upper())
     await interaction.response.send_message(msg)
 
-# ----------------- Prefix Commands -----------------
-prefixes = ["eu","elura"]
-prefix_bot = commands.Bot(command_prefix=prefixes, intents=discord.Intents.all())
-
-@prefix_bot.command(name="gyicreate")
-async def gyi_create_prefix(ctx):
-    code, msg = await gyi_manager.create_lobby(ctx.author, ctx.channel)
+# ------------------------- Prefix Commands -------------------------
+@bot.command(name="gtwcreate")
+async def gtw_create_prefix(ctx, *optional_players: discord.Member):
+    code, msg = await gtw_manager.create_lobby(ctx.author, ctx.channel, list(optional_players))
     await ctx.send(msg)
 
-@prefix_bot.command(name="gyijoin")
+@bot.command(name="gyicreate")
+async def gyi_create_prefix(ctx, *optional_players: discord.Member):
+    code, msg = await gyi_manager.create_lobby(ctx.author, ctx.channel, list(optional_players))
+    await ctx.send(msg)
+
+@bot.command(name="gtwjoin")
+async def gtw_join_prefix(ctx, code: str):
+    msg = await gtw_manager.join_lobby(ctx.author, code.upper())
+    await ctx.send(msg)
+
+@bot.command(name="gyijoin")
 async def gyi_join_prefix(ctx, code: str):
     msg = await gyi_manager.join_lobby(ctx.author, code.upper())
     await ctx.send(msg)
 
+# ------------------------- Helper -------------------------
+def lobby_code_from_lobby(lobby: dict):
+    """Get the code of a lobby from lobby dict."""
+    for code, l in gtw_manager.lobbies.items():
+        if l == lobby: return code
+    return None
 # ----------------- Helper Functions -----------------
 def load_json(file_path):
     import json
@@ -2533,27 +2361,49 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
         embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
 
     elif action == "unwarn":
-        punishments = load_json("punishments.json")
-        user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
-        if not user_warnings:
+    punishments = load_json("punishments.json")
+    
+    # Get all active warnings for the target user
+    user_warnings = [c for c in punishments["cases"] 
+                     if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
+    
+    if not user_warnings:
+        embed = discord.Embed(
+            title="✅ No Active Warnings",
+            description=f"{target.mention} has no active warnings.",
+            color=0x00FF00
+        )
+    else:
+        # Mod must specify a case_id
+        if not case_id:
             embed = discord.Embed(
-                title="✅ No Active Warnings",
-                description=f"{target.mention} has no active warnings.",
-                color=0x00FF00
+                title="❌ Case ID Required",
+                description=f"Please specify a Case ID to remove a warning from {target.mention}.\n"
+                            f"Use `/warnings target:{target.display_name}` to see active cases.",
+                color=0xFF0000
             )
         else:
-            latest_warning = user_warnings[-1]
-            for case in punishments["cases"]:
-                if case["id"] == latest_warning["id"]:
-                    case["active"] = False
-                    break
-            save_json("punishments.json", punishments)
-            embed = discord.Embed(
-                title="✅ Warning Removed",
-                description=f"Removed warning #{latest_warning['id']} from {target.mention}.",
-                color=0x00FF00
-            )
+            warning_to_remove = next((c for c in user_warnings if c["id"] == case_id), None)
+            if not warning_to_remove:
+                embed = discord.Embed(
+                    title="❌ Warning Not Found",
+                    description=f"{target.mention} has no active warning with Case ID #{case_id}.",
+                    color=0xFF0000
+                )
+            else:
+                # Deactivate the warning
+                for case in punishments["cases"]:
+                    if case["id"] == warning_to_remove["id"]:
+                        case["active"] = False
+                        break
+                save_json("punishments.json", punishments)
 
+                embed = discord.Embed(
+                    title="✅ Warning Removed",
+                    description=f"Removed warning #{warning_to_remove['id']} from {target.mention}.",
+                    color=0x00FF00
+        )
+                
     elif action == "warnings":
         punishments = load_json("punishments.json")
         user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
@@ -3370,7 +3220,231 @@ async def setup_slash(interaction: discord.Interaction):
 @bot.command(name="setup", aliases=["wizard"])
 async def setup_prefix(ctx):
     await setup_handler(ctx)
-    
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ELURA / EU SETUP WIZARD FOR GTW/GYI
+# Fully professional, animated, hover-enabled, multi-lobby ready
+# ══════════════════════════════════════════════════════════════════════════════
+
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+import asyncio
+import random
+import uuid
+import json
+import time
+from typing import List, Dict
+
+# ------------------------- Global Data -------------------------
+gtw_sessions: Dict[str, dict] = {}
+gyi_sessions: Dict[str, dict] = {}
+setup_sessions: Dict[int, dict] = {}
+
+# ---------------------- Helper Functions ----------------------
+def load_json(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(file_path, data):
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+def create_embed(title: str, description: str, color=0x3498DB):
+    return discord.Embed(title=title, description=f"```{description}```", color=color)
+
+def progress_bar(step, total, length=20):
+    filled = int(length * step / total)
+    empty = length - filled
+    return f"[{'█'*filled}{'─'*empty}] {step}/{total}"
+
+# ---------------------- Setup Wizard Class ----------------------
+class GTWSetupWizard(discord.ui.View):
+    """Animated, multi-step, hover-enabled setup wizard for GTW/GYI"""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.step = 1
+        self.config = load_json("config.json")
+        self.max_steps = 7
+        self.hovered_button: discord.ui.Button = None
+        self.embed_message = None
+
+    async def start(self, interaction: discord.Interaction):
+        embed = self.get_embed()
+        await interaction.response.send_message(embed=embed, view=self)
+        self.embed_message = await interaction.original_response()
+
+    def get_embed(self):
+        titles = {
+            1: "Set Moderation Channel",
+            2: "Punishment Tier Configuration",
+            3: "Economy Parameters",
+            4: "GTW Settings - Rounds & Max Impostors",
+            5: "GTW Settings - Banned Words",
+            6: "GTW Settings - Multi-lobby & Auto-delete",
+            7: "Finish Setup"
+        }
+        descriptions = {
+            1: "Select the moderation channel for logs.",
+            2: "Set punishment tier roles for moderation actions.",
+            3: "Configure wallet, earning rates, leaderboard.",
+            4: "Choose default rounds and maximum impostors.",
+            5: "Set banned words for GTW/GYI games.",
+            6: "Set maximum active lobbies and auto-delete timers.",
+            7: "Setup is complete! Review and save your settings."
+        }
+        return discord.Embed(
+            title=f"⚙️ ELURA / EU Setup Wizard - Step {self.step}/{self.max_steps}",
+            description=f"**{titles[self.step]}**\n{descriptions[self.step]}\n\nProgress: {progress_bar(self.step, self.max_steps)}",
+            color=0x9B59B6
+        )
+
+    async def update_embed(self):
+        if self.embed_message:
+            await self.embed_message.edit(embed=self.get_embed(), view=self)
+
+    def check_user(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            asyncio.create_task(interaction.response.send_message("This setup isn't for you!", ephemeral=True))
+            return False
+        return True
+
+    async def save_config(self):
+        save_json("config.json", self.config)
+
+    # ---------------------- Buttons ----------------------
+    @discord.ui.button(label="Next Step ➡️", style=discord.ButtonStyle.success)
+    async def next_step(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        self.step += 1
+        if self.step > self.max_steps:
+            await self.save_config()
+            for item in self.children:
+                item.disabled = True
+            embed = discord.Embed(
+                title="✅ Setup Complete!",
+                description="Your server is fully configured for GTW/GYI games.",
+                color=0x2ECC71
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+        else:
+            await self.update_embed()
+
+    @discord.ui.button(label="Skip Step ⏭️", style=discord.ButtonStyle.secondary)
+    async def skip_step(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        self.step += 1
+        if self.step > self.max_steps:
+            await self.save_config()
+            for item in self.children:
+                item.disabled = True
+            embed = discord.Embed(
+                title="✅ Setup Complete!",
+                description="Some steps were skipped. You can run `/setup` again to adjust settings.",
+                color=0xF1C40F
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+        else:
+            await self.update_embed()
+
+    # ---------------------- GTW/GYI Config Inputs ----------------------
+    @discord.ui.button(label="Set Rounds", style=discord.ButtonStyle.primary, emoji="🎲")
+    async def set_rounds(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        await interaction.response.send_message("Reply with default rounds number (integer).", ephemeral=True)
+        try:
+            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
+            rounds = int(msg.content.strip())
+            self.config["gtw"]["rounds"] = rounds
+            await interaction.followup.send(f"Default rounds set to `{rounds}` ✅", ephemeral=True)
+        except:
+            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+
+    @discord.ui.button(label="Set Max Impostors", style=discord.ButtonStyle.danger, emoji="🕵️")
+    async def set_max_impostors(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        await interaction.response.send_message("Reply with maximum impostors per lobby (integer).", ephemeral=True)
+        try:
+            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
+            max_imp = int(msg.content.strip())
+            self.config["gtw"]["max_impostors"] = max_imp
+            await interaction.followup.send(f"Maximum impostors set to `{max_imp}` ✅", ephemeral=True)
+        except:
+            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+
+    @discord.ui.button(label="Set Banned Words", style=discord.ButtonStyle.secondary, emoji="🚫")
+    async def set_banned_words(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        await interaction.response.send_message("Reply with banned words separated by commas.", ephemeral=True)
+        try:
+            msg = await interaction.client.wait_for("message", timeout=120, check=lambda m: m.author.id == self.user_id)
+            words = [w.strip() for w in msg.content.split(",") if w.strip()]
+            self.config["gtw"]["banned_words"] = words
+            await interaction.followup.send(f"Banned words updated ✅", ephemeral=True)
+        except:
+            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+
+    @discord.ui.button(label="Set Multi-lobby Count", style=discord.ButtonStyle.primary, emoji="🏢")
+    async def set_multi_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        await interaction.response.send_message("Reply with maximum number of active lobbies (integer).", ephemeral=True)
+        try:
+            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
+            count = int(msg.content.strip())
+            self.config["gtw"]["multi_lobby_count"] = count
+            await interaction.followup.send(f"Multi-lobby count set to `{count}` ✅", ephemeral=True)
+        except:
+            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+
+    @discord.ui.button(label="Set Auto-delete Timer", style=discord.ButtonStyle.secondary, emoji="🗑️")
+    async def set_auto_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        await interaction.response.send_message("Reply with auto-delete time in seconds for old lobbies.", ephemeral=True)
+        try:
+            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
+            timer = int(msg.content.strip())
+            self.config["gtw"]["auto_delete"] = timer
+            await interaction.followup.send(f"Auto-delete timer set to `{timer}` seconds ✅", ephemeral=True)
+        except:
+            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+
+# ---------------------- Setup Handler ----------------------
+async def setup_handler(ctx_or_interaction):
+    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
+    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
+    user_tier = 4  # Example: You can replace with actual permission system
+    if user_tier < 4:
+        embed = create_embed("⚠️ UNAUTHORIZED", "You need Tier 4+ permissions to run this setup!", 0xE74C3C)
+        if is_slash:
+            await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await ctx_or_interaction.send(embed=embed)
+        return
+
+    wizard = GTWSetupWizard(user.id)
+    await wizard.start(ctx_or_interaction)
+
+# ---------------------- Commands ----------------------
+bot = commands.Bot(command_prefix=["eu ", "elura "], intents=discord.Intents.all())
+
+@bot.tree.command(name="setup", description="Run the GTW/GYI setup wizard")
+async def setup_slash(interaction: discord.Interaction):
+    await setup_handler(interaction)
+
+@bot.command(name="setup")
+async def setup_prefix(ctx):
+    await setup_handler(ctx)
+
+# ---------------------- Auto-save Loop ----------------------
+@tasks.loop(minutes=5)
+async def auto_save_config():
+    save_json("config.json", load_json("config.json"))
+
+auto_save_config.start()
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECRET ADMIN RIGGING PANEL (PREFIX ONLY)
 # ══════════════════════════════════════════════════════════════════════════════
