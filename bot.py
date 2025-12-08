@@ -3212,33 +3212,19 @@ async def setup_handler(ctx_or_interaction):
     else:
         await ctx_or_interaction.send(embed=embed, view=view)
 
-# ---------------- Commands ----------------
-@bot.tree.command(name="setup", description="Run the professional setup wizard")
-async def setup_slash(interaction: discord.Interaction):
-    await setup_handler(interaction)
-
-@bot.command(name="setup", aliases=["wizard"])
-async def setup_prefix(ctx):
-    await setup_handler(ctx)
-
 # ══════════════════════════════════════════════════════════════════════════════
-# ELURA / EU SETUP WIZARD FOR GTW/GYI
-# Fully professional, animated, hover-enabled, multi-lobby ready
+# ELURA / EU PROFESSIONAL SETUP WIZARD
+# Fully interactive, multi-step, motion-glass, hover-enabled
+# Founder-verified, 6 steps, modular & scalable
 # ══════════════════════════════════════════════════════════════════════════════
 
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
 import asyncio
-import random
-import uuid
 import json
-import time
-from typing import List, Dict
+from typing import Dict, List
 
 # ------------------------- Global Data -------------------------
-gtw_sessions: Dict[str, dict] = {}
-gyi_sessions: Dict[str, dict] = {}
 setup_sessions: Dict[int, dict] = {}
 
 # ---------------------- Helper Functions ----------------------
@@ -3258,45 +3244,45 @@ def progress_bar(step, total, length=20):
     empty = length - filled
     return f"[{'█'*filled}{'─'*empty}] {step}/{total}"
 
+def is_founder(user_id: int, guild_id: int):
+    roles_data = load_json("roles.json")
+    guild_roles = roles_data.get(str(guild_id), {})
+    founder_ids = guild_roles.get("founders", [])
+    return user_id in founder_ids
+
 # ---------------------- Setup Wizard Class ----------------------
-class GTWSetupWizard(discord.ui.View):
-    """Animated, multi-step, hover-enabled setup wizard for GTW/GYI"""
-    def __init__(self, user_id: int):
-        super().__init__(timeout=600)
+class SetupWizard(discord.ui.View):
+    """Professional 6-step interactive setup wizard"""
+    def __init__(self, user_id: int, guild: discord.Guild):
+        super().__init__(timeout=900)
         self.user_id = user_id
+        self.guild = guild
         self.step = 1
-        self.config = load_json("config.json")
-        self.max_steps = 7
-        self.hovered_button: discord.ui.Button = None
-        self.embed_message = None
+        self.max_steps = 6
+        self.config = load_json("config.json").get(str(guild.id), {})
+        self.embed_message: discord.Message = None
 
-    async def start(self, interaction: discord.Interaction):
-        embed = self.get_embed()
-        await interaction.response.send_message(embed=embed, view=self)
-        self.embed_message = await interaction.original_response()
-
+    # ---------------------- Embed Handling ----------------------
     def get_embed(self):
-        titles = {
-            1: "Set Moderation Channel",
-            2: "Punishment Tier Configuration",
-            3: "Economy Parameters",
-            4: "GTW Settings - Rounds & Max Impostors",
-            5: "GTW Settings - Banned Words",
-            6: "GTW Settings - Multi-lobby & Auto-delete",
-            7: "Finish Setup"
+        step_titles = {
+            1: "Set Moderation Logs Channel",
+            2: "Configure Game Settings",
+            3: "Economy & Casino Channels",
+            4: "Auto-Moderation & Filters",
+            5: "Active Monitoring Channels",
+            6: "Founder Strictness & Confirmation"
         }
-        descriptions = {
-            1: "Select the moderation channel for logs.",
-            2: "Set punishment tier roles for moderation actions.",
-            3: "Configure wallet, earning rates, leaderboard.",
-            4: "Choose default rounds and maximum impostors.",
-            5: "Set banned words for GTW/GYI games.",
-            6: "Set maximum active lobbies and auto-delete timers.",
-            7: "Setup is complete! Review and save your settings."
+        step_descs = {
+            1: "Select the moderation logs channel where all mod actions will be recorded.",
+            2: "Enable/disable games, set rounds, max players, banned words.",
+            3: "Set channels for wallet, casino, and leaderboard functionalities.",
+            4: "Enable automod and filters to keep your server safe.",
+            5: "Choose the channels where the bot should actively monitor messages.",
+            6: "Select moderation strictness and confirm your settings."
         }
         return discord.Embed(
             title=f"⚙️ ELURA / EU Setup Wizard - Step {self.step}/{self.max_steps}",
-            description=f"**{titles[self.step]}**\n{descriptions[self.step]}\n\nProgress: {progress_bar(self.step, self.max_steps)}",
+            description=f"**{step_titles[self.step]}**\n{step_descs[self.step]}\n\nProgress: {progress_bar(self.step, self.max_steps)}",
             color=0x9B59B6
         )
 
@@ -3311,7 +3297,9 @@ class GTWSetupWizard(discord.ui.View):
         return True
 
     async def save_config(self):
-        save_json("config.json", self.config)
+        all_config = load_json("config.json")
+        all_config[str(self.guild.id)] = self.config
+        save_json("config.json", all_config)
 
     # ---------------------- Buttons ----------------------
     @discord.ui.button(label="Next Step ➡️", style=discord.ButtonStyle.success)
@@ -3324,7 +3312,7 @@ class GTWSetupWizard(discord.ui.View):
                 item.disabled = True
             embed = discord.Embed(
                 title="✅ Setup Complete!",
-                description="Your server is fully configured for GTW/GYI games.",
+                description="All settings are saved! Your server is fully configured.",
                 color=0x2ECC71
             )
             await interaction.response.edit_message(embed=embed, view=self)
@@ -3341,8 +3329,8 @@ class GTWSetupWizard(discord.ui.View):
             for item in self.children:
                 item.disabled = True
             embed = discord.Embed(
-                title="✅ Setup Complete!",
-                description="Some steps were skipped. You can run `/setup` again to adjust settings.",
+                title="⚠️ Setup Finished with Skipped Steps",
+                description="Some steps were skipped. You can rerun `/setup` to adjust them.",
                 color=0xF1C40F
             )
             await interaction.response.edit_message(embed=embed, view=self)
@@ -3350,87 +3338,119 @@ class GTWSetupWizard(discord.ui.View):
         else:
             await self.update_embed()
 
-    # ---------------------- GTW/GYI Config Inputs ----------------------
-    @discord.ui.button(label="Set Rounds", style=discord.ButtonStyle.primary, emoji="🎲")
-    async def set_rounds(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.check_user(interaction): return
-        await interaction.response.send_message("Reply with default rounds number (integer).", ephemeral=True)
-        try:
-            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
-            rounds = int(msg.content.strip())
-            self.config["gtw"]["rounds"] = rounds
-            await interaction.followup.send(f"Default rounds set to `{rounds}` ✅", ephemeral=True)
-        except:
-            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+    # ---------------------- Step Inputs ----------------------
 
-    @discord.ui.button(label="Set Max Impostors", style=discord.ButtonStyle.danger, emoji="🕵️")
-    async def set_max_impostors(self, interaction: discord.Interaction, button: discord.ui.Button):
+    # Step 1: Mod logs channel
+    @discord.ui.select(
+        placeholder="Select moderation logs channel",
+        min_values=1,
+        max_values=1,
+        options=[]
+    )
+    async def select_mod_logs(self, interaction: discord.Interaction, select: discord.ui.Select):
         if not self.check_user(interaction): return
-        await interaction.response.send_message("Reply with maximum impostors per lobby (integer).", ephemeral=True)
-        try:
-            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
-            max_imp = int(msg.content.strip())
-            self.config["gtw"]["max_impostors"] = max_imp
-            await interaction.followup.send(f"Maximum impostors set to `{max_imp}` ✅", ephemeral=True)
-        except:
-            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+        channel = self.guild.get_channel(int(select.values[0]))
+        if not channel:
+            await interaction.response.send_message("Invalid channel.", ephemeral=True)
+            return
+        self.config["mod_logs_channel"] = channel.id
+        await interaction.response.send_message(f"✅ Moderation logs channel set to {channel.mention}", ephemeral=True)
 
-    @discord.ui.button(label="Set Banned Words", style=discord.ButtonStyle.secondary, emoji="🚫")
-    async def set_banned_words(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.check_user(interaction): return
-        await interaction.response.send_message("Reply with banned words separated by commas.", ephemeral=True)
-        try:
-            msg = await interaction.client.wait_for("message", timeout=120, check=lambda m: m.author.id == self.user_id)
-            words = [w.strip() for w in msg.content.split(",") if w.strip()]
-            self.config["gtw"]["banned_words"] = words
-            await interaction.followup.send(f"Banned words updated ✅", ephemeral=True)
-        except:
-            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+    # Step 2: Games settings (modal for numeric input)
+    async def step2_modal(self, interaction: discord.Interaction):
+        modal = discord.ui.Modal(title="Game Settings")
+        rounds_input = discord.ui.TextInput(label="Default rounds", placeholder="10", required=True)
+        max_players_input = discord.ui.TextInput(label="Max players per game", placeholder="12", required=True)
+        modal.add_item(rounds_input)
+        modal.add_item(max_players_input)
 
-    @discord.ui.button(label="Set Multi-lobby Count", style=discord.ButtonStyle.primary, emoji="🏢")
-    async def set_multi_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.check_user(interaction): return
-        await interaction.response.send_message("Reply with maximum number of active lobbies (integer).", ephemeral=True)
-        try:
-            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
-            count = int(msg.content.strip())
-            self.config["gtw"]["multi_lobby_count"] = count
-            await interaction.followup.send(f"Multi-lobby count set to `{count}` ✅", ephemeral=True)
-        except:
-            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+        async def callback(modal_interaction: discord.Interaction):
+            self.config["games"] = {
+                "default_rounds": int(rounds_input.value),
+                "max_players": int(max_players_input.value)
+            }
+            await modal_interaction.response.send_message("✅ Game settings saved!", ephemeral=True)
 
-    @discord.ui.button(label="Set Auto-delete Timer", style=discord.ButtonStyle.secondary, emoji="🗑️")
-    async def set_auto_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal.on_submit = callback
+        await interaction.response.send_modal(modal)
+
+    # Step 3: Economy & casino channels
+    @discord.ui.select(
+        placeholder="Select economy/casino channels",
+        min_values=1,
+        max_values=3,
+        options=[]
+    )
+    async def select_economy_channels(self, interaction: discord.Interaction, select: discord.ui.Select):
         if not self.check_user(interaction): return
-        await interaction.response.send_message("Reply with auto-delete time in seconds for old lobbies.", ephemeral=True)
-        try:
-            msg = await interaction.client.wait_for("message", timeout=60, check=lambda m: m.author.id == self.user_id)
-            timer = int(msg.content.strip())
-            self.config["gtw"]["auto_delete"] = timer
-            await interaction.followup.send(f"Auto-delete timer set to `{timer}` seconds ✅", ephemeral=True)
-        except:
-            await interaction.followup.send("Invalid input. Step skipped.", ephemeral=True)
+        self.config["economy_channels"] = [int(ch) for ch in select.values]
+        channels = [self.guild.get_channel(int(ch)) for ch in select.values]
+        await interaction.response.send_message(f"✅ Economy channels set: {', '.join([c.mention for c in channels])}", ephemeral=True)
+
+    # Step 4: Auto mod & filters
+    @discord.ui.button(label="Enable/Disable Automod", style=discord.ButtonStyle.primary)
+    async def toggle_automod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        self.config["automod_enabled"] = not self.config.get("automod_enabled", False)
+        status = "enabled" if self.config["automod_enabled"] else "disabled"
+        await interaction.response.send_message(f"✅ Automod {status}", ephemeral=True)
+
+    # Step 5: Active monitoring channels
+    @discord.ui.select(
+        placeholder="Select monitoring channels",
+        min_values=1,
+        max_values=5,
+        options=[]
+    )
+    async def select_monitoring_channels(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not self.check_user(interaction): return
+        self.config["active_monitor_channels"] = [int(ch) for ch in select.values]
+        channels = [self.guild.get_channel(int(ch)) for ch in select.values]
+        await interaction.response.send_message(f"✅ Active monitoring channels: {', '.join([c.mention for c in channels])}", ephemeral=True)
+
+    # Step 6: Founder strictness
+    @discord.ui.select(
+        placeholder="Select moderation strictness",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label="Soft", description="Soft moderation"),
+            discord.SelectOption(label="Medium", description="Medium moderation"),
+            discord.SelectOption(label="Hard", description="Hard moderation")
+        ]
+    )
+    async def select_strictness(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not self.check_user(interaction): return
+        self.config["moderation_strictness"] = select.values[0]
+        await interaction.response.send_message(f"✅ Moderation strictness set to {select.values[0]}", ephemeral=True)
 
 # ---------------------- Setup Handler ----------------------
 async def setup_handler(ctx_or_interaction):
     is_slash = isinstance(ctx_or_interaction, discord.Interaction)
     user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
-    user_tier = 4  # Example: You can replace with actual permission system
-    if user_tier < 4:
-        embed = create_embed("⚠️ UNAUTHORIZED", "You need Tier 4+ permissions to run this setup!", 0xE74C3C)
+    guild = ctx_or_interaction.guild if is_slash else ctx_or_interaction.guild
+
+    if not is_founder(user.id, guild.id):
+        embed = create_embed("⚠️ UNAUTHORIZED", "Only founders can run this setup!", 0xE74C3C)
         if is_slash:
             await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await ctx_or_interaction.send(embed=embed)
         return
 
-    wizard = GTWSetupWizard(user.id)
-    await wizard.start(ctx_or_interaction)
+    wizard = SetupWizard(user.id, guild)
+    embed = wizard.get_embed()
+    if is_slash:
+        await ctx_or_interaction.response.send_message(embed=embed, view=wizard)
+        wizard.embed_message = await ctx_or_interaction.original_response()
+    else:
+        msg = await ctx_or_interaction.send(embed=embed, view=wizard)
+        wizard.embed_message = msg
 
-# ---------------------- Commands ----------------------
+# ---------------------- Bot Initialization ----------------------
 bot = commands.Bot(command_prefix=["eu ", "elura "], intents=discord.Intents.all())
 
-@bot.tree.command(name="setup", description="Run the GTW/GYI setup wizard")
+@bot.tree.command(name="setup", description="Run the full server setup wizard")
 async def setup_slash(interaction: discord.Interaction):
     await setup_handler(interaction)
 
@@ -3438,110 +3458,12 @@ async def setup_slash(interaction: discord.Interaction):
 async def setup_prefix(ctx):
     await setup_handler(ctx)
 
-# ---------------------- Auto-save Loop ----------------------
+# ---------------------- Auto-save Config ----------------------
 @tasks.loop(minutes=5)
 async def auto_save_config():
     save_json("config.json", load_json("config.json"))
 
 auto_save_config.start()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECRET ADMIN RIGGING PANEL (PREFIX ONLY)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class AdminPanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-    
-    @discord.ui.button(label="Inject Votes", style=discord.ButtonStyle.danger, emoji="💉")
-    async def inject_votes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(InjectVotesModal())
-    
-    @discord.ui.button(label="Override Winner", style=discord.ButtonStyle.danger, emoji="👑")
-    async def override_winner(self, interaction: discord.Interaction, button: discord.ui.Button):
-        election = load_json("election.json")
-        if not election["candidates"]:
-            await interaction.response.send_message("No candidates available!", ephemeral=True)
-            return
-        
-        await interaction.response.send_modal(OverrideWinnerModal())
-    
-    @discord.ui.button(label="Reset Election", style=discord.ButtonStyle.danger, emoji="🔄")
-    async def reset_election(self, interaction: discord.Interaction, button: discord.ui.Button):
-        election = {
-            "active": False,
-            "candidates": {},
-            "votes": {},
-            "voters": [],
-            "start_time": None,
-            "end_time": None
-        }
-        save_json("election.json", election)
-        await interaction.response.send_message("Election data has been reset!", ephemeral=True)
-    
-    @discord.ui.button(label="Modify Logs", style=discord.ButtonStyle.secondary, emoji="📝")
-    async def modify_logs(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Log modification panel coming soon...", ephemeral=True)
-
-class InjectVotesModal(discord.ui.Modal, title="Inject Votes"):
-    candidate_id = discord.ui.TextInput(label="Candidate User ID", placeholder="Enter candidate's user ID")
-    vote_count = discord.ui.TextInput(label="Votes to Add", placeholder="Enter number of votes")
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        election = load_json("election.json")
-        cid = self.candidate_id.value
-        votes = int(self.vote_count.value)
-        
-        if cid not in election["votes"]:
-            election["votes"][cid] = 0
-        election["votes"][cid] += votes
-        save_json("election.json", election)
-        
-        await interaction.response.send_message(f"Injected {votes} votes for candidate {cid}!", ephemeral=True)
-
-class OverrideWinnerModal(discord.ui.Modal, title="Override Winner"):
-    winner_id = discord.ui.TextInput(label="Winner User ID", placeholder="Enter the winner's user ID")
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        election = load_json("election.json")
-        wid = self.winner_id.value
-        
-        max_votes = max(election["votes"].values()) if election["votes"] else 0
-        election["votes"][wid] = max_votes + 1000
-        save_json("election.json", election)
-        
-        await interaction.response.send_message(f"Winner overridden to {wid}!", ephemeral=True)
-
-@bot.command(name="adpl")
-async def admin_panel(ctx):
-    """Secret admin rigging panel - prefix only"""
-    await ctx.message.delete()
-    
-    roles_data = load_json("roles.json")
-    founder_id = int(roles_data["founder"])
-    
-    if ctx.author.id != founder_id:
-        embed = create_glass_embed(
-            title=f"{Emojis.CROSS} Unknown Command",
-            description="This command does not exist.",
-            color=Colors.ERROR
-        )
-        await ctx.send(embed=embed, delete_after=5)
-        return
-    
-    embed = create_hologram_embed(
-        title=f"{Emojis.CROWN} ADMIN RIGGING PANEL",
-        description="**⚠️ TOP SECRET ACCESS ⚠️**\n\nWelcome, Founder. Select an action below.",
-        color=Colors.ERROR
-    )
-    
-    view = AdminPanelView()
-    
-    try:
-        await ctx.author.send(embed=embed, view=view)
-    except:
-        pass
-
 # ══════════════════════════════════════════════════════════════════════════════
 # ERROR HANDLING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3550,50 +3472,7 @@ async def admin_panel(ctx):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
-    elif isinstance(error, commands.MissingPermissions):
-        embed = create_glass_embed(
-            title=f"{Emojis.SHIELD} MISSING PERMISSIONS",
-            description="You don't have permission to use this command!",
-            color=Colors.ERROR
-        )
-        await ctx.send(embed=embed, delete_after=10)
-    elif isinstance(error, commands.MemberNotFound):
-        embed = create_glass_embed(
-            title=f"{Emojis.CROSS} MEMBER NOT FOUND",
-            description="Could not find the specified member!",
-            color=Colors.ERROR
-        )
-        await ctx.send(embed=embed, delete_after=10)
-    elif isinstance(error, commands.BadArgument):
-        embed = create_glass_embed(
-            title=f"{Emojis.CROSS} INVALID ARGUMENT",
-            description="Please check your command arguments!",
-            color=Colors.ERROR
-        )
-        await ctx.send(embed=embed, delete_after=10)
-    else:
-        print(f"[Error] {type(error).__name__}: {error}")
-
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        embed = create_glass_embed(
-            title=f"{Emojis.SHIELD} MISSING PERMISSIONS",
-            description="You don't have permission to use this command!",
-            color=Colors.ERROR
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        print(f"[Slash Error] {type(error).__name__}: {error}")
-        embed = create_glass_embed(
-            title=f"{Emojis.CROSS} ERROR",
-            description="An error occurred while processing your command.",
-            color=Colors.ERROR
-        )
-        try:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        except:
-            pass
+    elif isinsta
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BOT STARTUP
