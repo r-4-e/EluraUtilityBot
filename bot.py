@@ -2337,35 +2337,37 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
 
     # --- Action Logic ---
     if action == "warn":
-        case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
-        try:
-            dm_embed = discord.Embed(
-                title="⚠️ You have been warned!",
-                description=f"You have received a warning in **{guild.name}**.",
-                color=0xFFA500
-            )
-            dm_embed.add_field(name="Reason", value=reason, inline=False)
-            dm_embed.add_field(name="Case ID", value=f"#{case_id}", inline=False)
-            dm_embed.set_footer(text="Please adhere to the server rules to avoid further actions.")
-            await target.send(embed=dm_embed)
-        except:
-            pass
-        
-        embed = discord.Embed(
-            title="⚠️ User Warned",
-            description=f"{target.mention} has been warned.",
+    case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
+    try:
+        dm_embed = discord.Embed(
+            title="⚠️ You have been warned!",
+            description=f"You have received a warning in **{guild.name}**.",
             color=0xFFA500
         )
-        embed.add_field(name="Moderator", value=user.mention, inline=True)
-        embed.add_field(name="Reason", value=reason, inline=True)
-        embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
+        dm_embed.add_field(name="Reason", value=reason, inline=False)
+        dm_embed.add_field(name="Case ID", value=f"#{case_id}", inline=False)
+        dm_embed.set_footer(text="Please adhere to the server rules to avoid further actions.")
+        await target.send(embed=dm_embed)
+    except:
+        pass
+    
+    embed = discord.Embed(
+        title="⚠️ User Warned",
+        description=f"{target.mention} has been warned.",
+        color=0xFFA500
+    )
+    embed.add_field(name="Moderator", value=user.mention, inline=True)
+    embed.add_field(name="Reason", value=reason, inline=True)
+    embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
 
-    elif action == "unwarn":
+elif action == "unwarn":
     punishments = load_json("punishments.json")
     
     # Get all active warnings for the target user
-    user_warnings = [c for c in punishments["cases"] 
-                     if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
+    user_warnings = [
+        c for c in punishments["cases"] 
+        if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]
+    ]
     
     if not user_warnings:
         embed = discord.Embed(
@@ -2402,7 +2404,7 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
                     title="✅ Warning Removed",
                     description=f"Removed warning #{warning_to_remove['id']} from {target.mention}.",
                     color=0x00FF00
-        )
+                )
                 
     elif action == "warnings":
         punishments = load_json("punishments.json")
