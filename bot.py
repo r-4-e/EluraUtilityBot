@@ -2336,84 +2336,83 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
         return
 
     # --- Action Logic ---
-      if action == "warn":
-       case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
+    if action == "warn":
+        case_id = await create_case(guild.id, user.id, target.id, "WARN", reason)
 
-    try:
-        dm_embed = discord.Embed(
-            title="⚠️ You have been warned!",
-            description=f"You have received a warning in **{guild.name}**.",
+        try:
+            dm_embed = discord.Embed(
+                title="⚠️ You have been warned!",
+                description=f"You have received a warning in **{guild.name}**.",
+                color=0xFFA500
+            )
+            dm_embed.add_field(name="Reason", value=reason, inline=False)
+            dm_embed.add_field(name="Case ID", value=f"#{case_id}", inline=False)
+            dm_embed.set_footer(text="Please adhere to the server rules.")
+            await target.send(embed=dm_embed)
+        except:
+            pass
+
+        embed = discord.Embed(
+            title="⚠️ User Warned",
+            description=f"{target.mention} has been warned.",
             color=0xFFA500
         )
-        dm_embed.add_field(name="Reason", value=reason, inline=False)
-        dm_embed.add_field(name="Case ID", value=f"#{case_id}", inline=False)
-        dm_embed.set_footer(text="Please adhere to the server rules.")
-        await target.send(embed=dm_embed)
-    except:
-        pass
-
-    embed = discord.Embed(
-        title="⚠️ User Warned",
-        description=f"{target.mention} has been warned.",
-        color=0xFFA500
-    )
-    embed.add_field(name="Moderator", value=user.mention, inline=True)
-    embed.add_field(name="Reason", value=reason, inline=True)
-    embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
+        embed.add_field(name="Moderator", value=user.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=True)
+        embed.add_field(name="Case ID", value=f"#{case_id}", inline=True)
 
     elif action == "unwarn":
-      punishments = load_json("punishments.json")
+        punishments = load_json("punishments.json")
 
-    user_warnings = [
-        c for c in punishments["cases"]
-        if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]
-    ]
+        user_warnings = [
+            c for c in punishments["cases"]
+            if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]
+        ]
 
-    if not user_warnings:
-        embed = discord.Embed(
-            title="✅ No Active Warnings",
-            description=f"{target.mention} has no active warnings.",
-            color=0x00FF00
-        )
-
-    else:
-        if not case_id:
+        if not user_warnings:
             embed = discord.Embed(
-                title="❌ Case ID Required",
-                description=(
-                    f"Please specify a Case ID.\n"
-                    f"Use `/warnings target:{target.display_name}` to view active warnings."
-                ),
-                color=0xFF0000
+                title="✅ No Active Warnings",
+                description=f"{target.mention} has no active warnings.",
+                color=0x00FF00
             )
 
         else:
-            warning_to_remove = next(
-                (c for c in user_warnings if c["id"] == case_id),
-                None
-            )
-
-            if not warning_to_remove:
+            if not case_id:
                 embed = discord.Embed(
-                    title="❌ Warning Not Found",
-                    description=f"No active warning found with Case ID #{case_id}.",
+                    title="❌ Case ID Required",
+                    description=(
+                        f"Please specify a Case ID.\n"
+                        f"Use `/warnings target:{target.display_name}` to view active warnings."
+                    ),
                     color=0xFF0000
                 )
 
             else:
-                for case in punishments["cases"]:
-                    if case["id"] == warning_to_remove["id"]:
-                        case["active"] = False
-                        break
+                warning_to_remove = next(
+                    (c for c in user_warnings if c["id"] == case_id),
+                    None
+                )
 
-                save_json("punishments.json", punishments)
+                if not warning_to_remove:
+                    embed = discord.Embed(
+                        title="❌ Warning Not Found",
+                        description=f"No active warning found with Case ID #{case_id}.",
+                        color=0xFF0000
+                    )
 
-                embed = discord.Embed(
-                    title="✅ Warning Removed",
-                    description=f"Removed warning #{warning_to_remove['id']} from {target.mention}.",
-                    color=0x00FF00
-)
-                
+                else:
+                    for case in punishments["cases"]:
+                        if case["id"] == warning_to_remove["id"]:
+                            case["active"] = False
+                            break
+
+                    save_json("punishments.json", punishments)
+
+                    embed = discord.Embed(
+                        title="✅ Warning Removed",
+                        description=f"Removed warning #{warning_to_remove['id']} from {target.mention}.",
+                        color=0x00FF00
+    )            
     elif action == "warnings":
         punishments = load_json("punishments.json")
         user_warnings = [c for c in punishments["cases"] if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]]
