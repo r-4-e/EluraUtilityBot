@@ -2350,7 +2350,7 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
         await target.send(embed=dm_embed)
     except:
         pass
-    
+
     embed = discord.Embed(
         title="⚠️ User Warned",
         description=f"{target.mention} has been warned.",
@@ -2362,13 +2362,12 @@ async def punishment_handler(ctx_or_interaction, action: str, target: discord.Me
 
 elif action == "unwarn":
     punishments = load_json("punishments.json")
-    
-    # Get all active warnings for the target user
+
     user_warnings = [
-        c for c in punishments["cases"] 
+        c for c in punishments["cases"]
         if c["target_id"] == target.id and c["action"] == "WARN" and c["active"]
     ]
-    
+
     if not user_warnings:
         embed = discord.Embed(
             title="✅ No Active Warnings",
@@ -2376,7 +2375,6 @@ elif action == "unwarn":
             color=0x00FF00
         )
     else:
-        # Mod must specify a case_id
         if not case_id:
             embed = discord.Embed(
                 title="❌ Case ID Required",
@@ -2385,7 +2383,11 @@ elif action == "unwarn":
                 color=0xFF0000
             )
         else:
-            warning_to_remove = next((c for c in user_warnings if c["id"] == case_id), None)
+            warning_to_remove = next(
+                (c for c in user_warnings if c["id"] == case_id),
+                None
+            )
+
             if not warning_to_remove:
                 embed = discord.Embed(
                     title="❌ Warning Not Found",
@@ -2393,18 +2395,18 @@ elif action == "unwarn":
                     color=0xFF0000
                 )
             else:
-                # Deactivate the warning
                 for case in punishments["cases"]:
                     if case["id"] == warning_to_remove["id"]:
                         case["active"] = False
                         break
+
                 save_json("punishments.json", punishments)
 
                 embed = discord.Embed(
                     title="✅ Warning Removed",
                     description=f"Removed warning #{warning_to_remove['id']} from {target.mention}.",
                     color=0x00FF00
-                )
+    )
                 
     elif action == "warnings":
         punishments = load_json("punishments.json")
