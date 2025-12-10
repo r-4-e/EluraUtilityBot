@@ -2165,15 +2165,28 @@ async def on_ready():
     print(f"{bot.user} is online!")
 
 # ------------------------- Slash Commands -------------------------
+# Assuming 'List' is imported from 'typing' or Python 3.9+ 'list' is used.
+# Since the problematic type is removed, the import is no longer strictly needed for this file.
+
 @bot.tree.command(name="gtw_create", description="Create a GTW lobby")
-@app_commands.describe(optional_players="Optional extra players after the required 3")
-async def gtw_create(interaction: discord.Interaction, optional_players: List[discord.Member] = []):
+@app_commands.describe(
+    optional_players="Optional extra players User IDs, separated by spaces (e.g., 12345 67890)"
+)
+async def gtw_create(interaction: discord.Interaction, optional_players: str = ""):
+    # NOTE: You will need to modify the gtw_manager.create_lobby function
+    # to handle the 'optional_players' parameter as a string of IDs, 
+    # split it, and fetch the Member objects.
     code, msg = await gtw_manager.create_lobby(interaction.user, interaction.channel, optional_players)
     await interaction.response.send_message(msg)
 
 @bot.tree.command(name="gyi_create", description="Create a GYI lobby")
-@app_commands.describe(optional_players="Optional extra players after the required 3")
-async def gyi_create(interaction: discord.Interaction, optional_players: List[discord.Member] = []):
+@app_commands.describe(
+    optional_players="Optional extra players User IDs, separated by spaces (e.g., 12345 67890)"
+)
+async def gyi_create(interaction: discord.Interaction, optional_players: str = ""):
+    # NOTE: You will need to modify the gyi_manager.create_lobby function
+    # to handle the 'optional_players' parameter as a string of IDs, 
+    # split it, and fetch the Member objects.
     code, msg = await gyi_manager.create_lobby(interaction.user, interaction.channel, optional_players)
     await interaction.response.send_message(msg)
 
@@ -2188,7 +2201,7 @@ async def gtw_join(interaction: discord.Interaction, code: str):
 async def gyi_join(interaction: discord.Interaction, code: str):
     msg = await gyi_manager.join_lobby(interaction.user, code.upper())
     await interaction.response.send_message(msg)
-
+    
 # ------------------------- Prefix Commands -------------------------
 @bot.command(name="gtwcreate")
 async def gtw_create_prefix(ctx, *optional_players: discord.Member):
