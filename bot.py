@@ -867,7 +867,11 @@ async def casino_handler(ctx_or_interaction, game: str, bet: int = None, choice:
             
             reels = random.choices(symbols, weights=weights, k=3)
             
-            display = f"╔═══════════════════╗\n║  {reels[0]}  │  {reels[1]}  │  {reels[2]}  ║\n╚═════════════════�[...]
+            display = (
+    f"╔═══════════════════╗\n"
+    f"║  {reels[0]}  │  {reels[1]}  │  {reels[2]}  ║\n"
+    f"╚═══════════════════╝"
+    )
             
             if reels[0] == reels[1] == reels[2]:
                 if reels[0] == "7️⃣":
