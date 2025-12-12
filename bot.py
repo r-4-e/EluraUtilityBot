@@ -3337,4 +3337,4 @@ class SetupWizard(discord.ui.View):
                 item.disabled = True
             embed = discord.Embed(
                 title="✅ Setup Complete!",
-                description="All settings are saved! Your server
+                description="All settings are saved!"
