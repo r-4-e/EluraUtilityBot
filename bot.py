@@ -2821,15 +2821,6 @@ async def counter_handler(ctx_or_interaction, action: str):
             await ctx_or_interaction.response.send_message(embed=embed)
         else:
             await ctx_or_interaction.send(embed=embed)
-    
-    elif action == "summary":
-        election = load_json("election.json")
-        
-        embed = create_hologram_embed(
-            title=f"{Emojis.SPARKLE} SERVER SUMMARY",
-            description=f"**Total Messages:** {counter['total']:,}\n**Tracked Users:** {len(counter['users'])}\n\n**Election Status:** {'🟢 Active' if election['active'] else '🔴 Inactive'}\n**Tot[...]
-            color=Colors.INFO
-        )
         
         if is_slash:
             await ctx_or_interaction.response.send_message(embed=embed)
@@ -2841,20 +2832,10 @@ async def leaderboard_slash(interaction: discord.Interaction):
     async with get_command_lock("leaderboard"):
         await counter_handler(interaction, "leaderboard")
 
-@bot.tree.command(name="summary", description="View server summary")
-async def summary_slash(interaction: discord.Interaction):
-    async with get_command_lock("summary"):
-        await counter_handler(interaction, "summary")
-
 @bot.command(name="leaderboard", aliases=["lb", "top"])
 async def leaderboard_prefix(ctx):
     async with get_command_lock("leaderboard"):
         await counter_handler(ctx, "leaderboard")
-
-@bot.command(name="summary", aliases=["stats"])
-async def summary_prefix(ctx):
-    async with get_command_lock("summary"):
-        await counter_handler(ctx, "summary")
 
 # ══════════════════════════════════════════════════════════════════[...]
 # COUNTING CHANNEL SETUP
