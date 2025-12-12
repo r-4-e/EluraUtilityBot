@@ -3337,4 +3337,210 @@ class SetupWizard(discord.ui.View):
                 item.disabled = True
             embed = discord.Embed(
                 title="✅ Setup Complete!",
-                description="All settings are saved!"
+                
+                description="All settings are saved! Your server is fully configured.",
+                color=0x2ECC71
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+        else:
+            await self.update_embed()
+
+    @discord.ui.button(label="Skip Step ⏭️", style=discord.ButtonStyle.secondary)
+    async def skip_step(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        self.step += 1
+        if self.step > self.max_steps:
+            await self.save_config()
+            for item in self.children:
+                item.disabled = True
+            embed = discord.Embed(
+                title="⚠️ Setup Finished with Skipped Steps",
+                description="Some steps were skipped. You can rerun `/setup` to adjust them.",
+                color=0xF1C40F
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+        else:
+            await self.update_embed()
+
+    # ---------------------- Step Inputs ----------------------
+
+    # Step 1: Mod logs channel
+    @discord.ui.select(
+        placeholder="Select moderation logs channel",
+        min_values=1,
+        max_values=1,
+        options=[]
+    )
+    async def select_mod_logs(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not self.check_user(interaction): return
+        channel = self.guild.get_channel(int(select.values[0]))
+        if not channel:
+            await interaction.response.send_message("Invalid channel.", ephemeral=True)
+            return
+        self.config["mod_logs_channel"] = channel.id
+        await interaction.response.send_message(f"✅ Moderation logs channel set to {channel.mention}", ephemeral=True)
+
+    # Step 2: Games settings (modal for numeric input)
+    async def step2_modal(self, interaction: discord.Interaction):
+        modal = discord.ui.Modal(title="Game Settings")
+        rounds_input = discord.ui.TextInput(label="Default rounds", placeholder="10", required=True)
+        max_players_input = discord.ui.TextInput(label="Max players per game", placeholder="12", required=True)
+        modal.add_item(rounds_input)
+        modal.add_item(max_players_input)
+
+        async def callback(modal_interaction: discord.Interaction):
+            self.config["games"] = {
+                "default_rounds": int(rounds_input.value),
+                "max_players": int(max_players_input.value)
+            }
+            await modal_interaction.response.send_message("✅ Game settings saved!", ephemeral=True)
+
+        modal.on_submit = callback
+        await interaction.response.send_modal(modal)
+
+    # Step 3: Economy & casino channels
+    @discord.ui.select(
+        placeholder="Select economy/casino channels",
+        min_values=1,
+        max_values=3,
+        options=[]
+    )
+    async def select_economy_channels(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not self.check_user(interaction): return
+        self.config["economy_channels"] = [int(ch) for ch in select.values]
+        channels = [self.guild.get_channel(int(ch)) for ch in select.values]
+        await interaction.response.send_message(f"✅ Economy channels set: {', '.join([c.mention for c in channels])}", ephemeral=True)
+
+    # Step 4: Auto mod & filters
+    @discord.ui.button(label="Enable/Disable Automod", style=discord.ButtonStyle.primary)
+    async def toggle_automod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.check_user(interaction): return
+        self.config["automod_enabled"] = not self.config.get("automod_enabled", False)
+        status = "enabled" if self.config["automod_enabled"] else "disabled"
+        await interaction.response.send_message(f"✅ Automod {status}", ephemeral=True)
+
+    # Step 5: Active monitoring channels
+    @discord.ui.select(
+        placeholder="Select monitoring channels",
+        min_values=1,
+        max_values=5,
+        options=[]
+    )
+    async def select_monitoring_channels(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not self.check_user(interaction): return
+        self.config["active_monitor_channels"] = [int(ch) for ch in select.values]
+        channels = [self.guild.get_channel(int(ch)) for ch in select.values]
+        await interaction.response.send_message(f"✅ Active monitoring channels: {', '.join([c.mention for c in channels])}", ephemeral=True)
+
+    # Step 6: Founder strictness
+    @discord.ui.select(
+        placeholder="Select moderation strictness",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label="Soft", description="Soft moderation"),
+            discord.SelectOption(label="Medium", description="Medium moderation"),
+            discord.SelectOption(label="Hard", description="Hard moderation")
+        ]
+    )
+    async def select_strictness(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not self.check_user(interaction): return
+        self.config["moderation_strictness"] = select.values[0]
+        await interaction.response.send_message(f"✅ Moderation strictness set to {select.values[0]}", ephemeral=True)
+
+# ---------------------- Setup Handler ----------------------
+async def setup_handler(ctx_or_interaction):
+    is_slash = isinstance(ctx_or_interaction, discord.Interaction)
+    user = ctx_or_interaction.user if is_slash else ctx_or_interaction.author
+    guild = ctx_or_interaction.guild if is_slash else ctx_or_interaction.guild
+
+    if not is_founder(user.id, guild.id):
+        embed = create_embed("⚠️ UNAUTHORIZED", "Only founders can run this setup!", 0xE74C3C)
+        if is_slash:
+            await ctx_or_interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await ctx_or_interaction.send(embed=embed)
+        return
+
+    wizard = SetupWizard(user.id, guild)
+    embed = wizard.get_embed()
+    if is_slash:
+        await ctx_or_interaction.response.send_message(embed=embed, view=wizard)
+        wizard.embed_message = await ctx_or_interaction.original_response()
+    else:
+        msg = await ctx_or_interaction.send(embed=embed, view=wizard)
+        wizard.embed_message = msg
+
+# ---------------------- Bot Initialization ----------------------
+bot = commands.Bot(command_prefix=["eu ", "elura "], intents=discord.Intents.all())
+
+@bot.tree.command(name="setup", description="Run the full server setup wizard")
+async def setup_slash(interaction: discord.Interaction):
+    await setup_handler(interaction)
+
+@bot.command(name="setup")
+async def setup_prefix(ctx):
+    await setup_handler(ctx)
+
+# ---------------------- Auto-save Config ----------------------
+@tasks.loop(minutes=5)
+async def auto_save_config():
+    save_json("config.json", load_json("config.json"))
+
+auto_save_config.start()
+# ══════════════════════════════════════════════════════════════════════════════
+# ERROR HANDLING
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    elif isinsta
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BOT STARTUP
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    ensure_json_files()
+    
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║                    {BOT_NAME.upper()} ERROR                 ║
+╠══════════════════════════════════════════════════════════════╣
+║  DISCORD_BOT_TOKEN environment variable not found!           ║
+║  Please set your bot token in the Secrets tab.               ║
+╚══════════════════════════════════════════════════════════════╝
+        """)
+        return
+    
+    bot.run(token)
+
+# ──────────────────────────────────────────────────────────────
+# Render Web Service requires a PORT → create tiny webserver
+# ──────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import threading
+    from flask import Flask
+
+    app = Flask(__name__)
+
+    @app.route("/")
+    def home():
+        return f"{BOT_NAME} is running!"
+
+    # Start mini webserver so Render detects service as 'healthy'
+    def run_web():
+        port = int(os.environ.get("PORT", 10000))
+        app.run(host="0.0.0.0", port=port)
+
+    threading.Thread(target=run_web).start()
+
+    # Start the Discord bot
+    main()
