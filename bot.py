@@ -2682,7 +2682,13 @@ async def translate_handler(ctx_or_interaction, text: str = None, target_lang: s
     if not text:
         embed = create_glass_embed(
             title=f"{Emojis.GLOBE} TRANSLATE",
-            description="Usage: `translate <text>` or `translate <text> to <language>`\n\n**Supported Languages:**\n🇬🇧 English (en) | 🇪🇸 Spanish (es) | 🇫🇷 French (fr)\n🇩🇪 Germa[...]
+            description=(
+    "Usage: `translate <text>` or `translate <text> to <language>`\n\n"
+    "**Supported Languages:**\n"
+    "🇬🇧 English (en) | 🇪🇸 Spanish (es) | 🇫🇷 French (fr)\n"
+    "🇩🇪 German (de) | 🇮🇹 Italian (it) | 🇯🇵 Japanese (ja)\n"
+    "🇰🇷 Korean (ko) | 🇮🇳 Hindi (hi) | 🇨🇳 Chinese (zh)\n"
+        )
             color=Colors.INFO
         )
         if is_slash:
