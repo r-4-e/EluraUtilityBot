@@ -3488,8 +3488,7 @@ async def setup_prefix(ctx):
 @tasks.loop(minutes=5)
 async def auto_save_config():
     save_json("config.json", load_json("config.json"))
-
-auto_save_config.start()
+    
 # ══════════════════════════════════════════════════════════════════════════════
 # ERROR HANDLING
 # ══════════════════════════════════════════════════════════════════════════════
