@@ -3498,7 +3498,6 @@ auto_save_config.start()
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
-    elif isinsta
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BOT STARTUP
